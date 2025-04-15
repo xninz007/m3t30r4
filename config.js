@@ -2,7 +2,7 @@
 import { PublicKey } from "@solana/web3.js";
 
 // Ganti dengan key asli
-export const RPC = "https://mainnet.helius-rpc.com/?api-key=45d8a2f1-3394-4ca3-944a-582cd93d2c1e";
+export const RPC = "GANTI RPC";
 
 // Jangan hardcode pool lagi
 export const getPoolAddress = async () => {
