@@ -2,6 +2,7 @@
   "name": "project-meteora",
   "version": "1.0.0",
   "main": "main.js",
+  "type": "module",
   "scripts": {
     "start": "node main.js"
   },
@@ -12,6 +13,8 @@
     "axios": "^1.8.4",
     "bn.js": "^5.2.1",
     "bs58": "^6.0.0",
+    "path": "^0.12.7",
+    "fs": "^0.0.1-security",
     "inquirer": "^12.5.2",
     "node-fetch": "^3.3.2"
   }
