@@ -3,6 +3,7 @@ import { PublicKey } from "@solana/web3.js";
 
 // Ganti dengan key asli
 export const RPC = "GANTI RPC";
+export const bs58PrivateKey ="Private KEY 1";
 
 // Jangan hardcode pool lagi
 export const getPoolAddress = async () => {
