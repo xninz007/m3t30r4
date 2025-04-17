@@ -5,7 +5,7 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountIdempotent,
 } from "@solana/spl-token";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, TransactionInstruction, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import { bs58PrivateKey, RPC } from "./config.js";
 import bs58 from "bs58";
 import { getPriorityInstructions } from "./lib/fee.js"; // pastikan path ini sesuai
@@ -27,7 +27,7 @@ export async function getPriceUsdMap(mintList) {
       map[mint] = price;
     }
 
-    console.log("💲 Prices:", map);
+
     return map;
   } catch (err) {
     console.error("❌ Failed to fetch price from Jupiter:", err);
@@ -68,6 +68,37 @@ export async function ensureAtaTokenAccount(connection, mint, user) {
   }
 }
 
+export async function autoUnwrapWsol(user) {
+  const wsolMint = new PublicKey("So11111111111111111111111111111111111111112");
+  const ata = await getAssociatedTokenAddress(wsolMint, user.publicKey);
+  const balance = await connection.getTokenAccountBalance(ata).catch(() => null);
+  if (!balance || balance.value.uiAmount === 0) {
+    return false;
+  }
+
+  console.log(`💧 Unwrapping WSOL: ${balance.value.uiAmount} SOL`);
+
+  const tx = new Transaction().add(
+    new TransactionInstruction({
+      keys: [
+        { pubkey: ata, isSigner: false, isWritable: true },
+        { pubkey: user.publicKey, isSigner: true, isWritable: true },
+      ],
+      programId: TOKEN_PROGRAM_ID,
+      data: Buffer.from([9]), // close account
+    })
+  );
+
+  try {
+    const sig = await sendAndConfirmTransaction(connection, tx, [user]);
+    console.log("✅ WSOL unwrapped → SOL:", sig);
+    return true;
+  } catch (err) {
+    console.warn("❌ Gagal unwrap WSOL:", err.message || err);
+    return false;
+  }
+}
+
 
 export async function getUserTokenBalanceNative(connection, mintAddress, pubkey) {
   try {
@@ -101,6 +132,15 @@ export async function getUserTokenBalanceNative(connection, mintAddress, pubkey)
     }
 
     return maxBalance;
+  }
+}
+
+export async function getSolBalance(pubkey) {
+  try {
+    const balance = await connection.getBalance(pubkey);
+    return balance / 1e9;
+  } catch (e) {
+    return 0;
   }
 }
 
