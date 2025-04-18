@@ -7,7 +7,7 @@ import dlmmPkg from "@meteora-ag/dlmm";
 const createDlmmPool = dlmmPkg.create || dlmmPkg.DLMM?.create || dlmmPkg.default?.create;
 import BN from "bn.js";
 import fs from "fs";
-import fetch from "node-fetch";
+import axios from "axios";
 
 const connection = new Connection(RPC);
 const pnlStorePath = "./pnl.json";
@@ -24,10 +24,10 @@ export function delay(ms) {
 
 export async function getPoolName(poolAddress) {
   try {
-    const res = await fetch(`https://dlmm-api.meteora.ag/pair/${poolAddress}`);
-    const json = await res.json();
-    return json.name || `UnknownPair(${poolAddress.slice(0, 4)})`;
+    const { data } = await axios.get(`https://dlmm-api.meteora.ag/pair/${poolAddress}`);
+    return data.name || `UnknownPair(${poolAddress.slice(0, 4)})`;
   } catch (e) {
+    console.warn(`⚠️ Gagal fetch pool name untuk ${poolAddress}:`, e.code || e.message);
     return `UnknownPair(${poolAddress.slice(0, 4)})`;
   }
 }
@@ -122,7 +122,7 @@ export async function monitorPnL(poolAddressStr, user) {
     const IL_USD = hodlValue - lpValue;    
 
       console.log(
-        `[${publicKey.toBase58().slice(0, 6)}] [${posKey.slice(0, 6)}] (${pairName})` +
+        `[${publicKey.toBase58().slice(0, 6)}] [${poolAddressStr.slice(0, 6)}] [${posKey.slice(0, 6)}] (${pairName})` +
         `💰 $${startValue.toFixed(2)} → $${currentValue.toFixed(2)} | ` +
         `${inRange ? "🟢 In-Range" : "🔴 Out-Range"} | ` +
         `${profit >= 0 ? "🟢" : "🔴"} ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)} (${percent.toFixed(2)}%) | ` +
@@ -157,6 +157,42 @@ export async function monitorPnL(poolAddressStr, user) {
       if (percent >= TP || percent <= SL) {
         pendingRemove.add(posKey);
         console.log(`🎯 Posisi ${posKey.slice(0, 6)} hit ${percent >= TP ? 'TP' : 'SL'} (${percent.toFixed(2)}%)`);
+      
+        // 💥 Jika SL, tambahkan lossCount
+        if (percent <= SL) {
+          pnlStore[posKey].lossCount = (pnlStore[posKey].lossCount || 0) + 1;
+          console.log(`📉 Posisi ${posKey.slice(0, 6)} mengalami kerugian ke-${pnlStore[posKey].lossCount}`);
+      
+          if (pnlStore[posKey].lossCount >= 2) {
+            const skipUntil = Date.now() + 24 * 60 * 60 * 1000; // 1 hari
+            const cooldownGlobalPath = "./cooldown.json";
+            const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
+              ? JSON.parse(fs.readFileSync(cooldownGlobalPath, "utf8"))
+              : {};
+      
+            cooldownGlobal[mintXStr] = skipUntil;
+            fs.writeFileSync(cooldownGlobalPath, JSON.stringify(cooldownGlobal, null, 2));
+      
+            console.log(`🚫 Token ${mintXStr.slice(0, 6)} rugi 2x, skip selama 1 hari sampai ${new Date(skipUntil).toLocaleTimeString()}`);
+          }
+        }
+      
+        // 🟢 Reset lossCount & set cooldown jika TP
+        if (percent >= TP) {
+          pnlStore[posKey].lossCount = 0;
+          pnlStore[posKey].cooldownUntil = Date.now() + 30 * 60 * 1000;
+          console.log(`⏸️ Token cooldown hingga ${new Date(pnlStore[posKey].cooldownUntil).toLocaleTimeString()}`);
+      
+          const cooldownGlobalPath = "./cooldown.json";
+          const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
+            ? JSON.parse(fs.readFileSync(cooldownGlobalPath, "utf8"))
+            : {};
+      
+          cooldownGlobal[mintXStr] = pnlStore[posKey].cooldownUntil;
+          fs.writeFileSync(cooldownGlobalPath, JSON.stringify(cooldownGlobal, null, 2));
+        }
+      
+        pendingRemove.add(posKey);
       
         let success = false;
       
@@ -264,12 +300,23 @@ export async function monitorPnL(poolAddressStr, user) {
             }
         
             if (wsolBal > 0) {
-              const unwrapped = await autoUnwrapWsol(user);
-              if (unwrapped) {
-                console.log(`💧 WSOL sebesar ${wsolBal} berhasil di-unwrapped ke SOL`);
-              } else {
-                console.warn(`⚠️ Gagal unwrap WSOL ke SOL (fungsi gagal dijalankan)`);
+              let unwrapped = false;
+              for (let retry = 0; retry < 2; retry++) {
+                unwrapped = await autoUnwrapWsol(user);
+                if (unwrapped) {
+                  console.log(`💧 WSOL sebesar ${wsolBal} berhasil di-unwrapped ke SOL`);
+                  break;
+                }
+                if (retry === 0) {
+                  console.log("⏳ Retry unwrap WSOL dalam 5 detik...");
+                  await delay(5000);
+                }
               }
+              if (!unwrapped) {
+                console.warn(`⚠️ Gagal unwrap WSOL ke SOL setelah retry`);
+              }
+            
+            
             } else {
               console.warn(`⚠️ Tidak ada WSOL untuk di-unwrapped setelah ${MAX_RETRY}x cek`);
             }
@@ -279,23 +326,7 @@ export async function monitorPnL(poolAddressStr, user) {
         } else {
           console.warn(`❌ Gagal swap: saldo token X (${mintXStr.slice(0, 6)}) belum masuk setelah remove.`);
         }
-                             
-        // Cooldown jika TP
-        if (percent >= TP) {
-          pnlStore[posKey].cooldownUntil = Date.now() + 30 * 60 * 1000;
-          console.log(`⏸️ Token cooldown hingga ${new Date(pnlStore[posKey].cooldownUntil).toLocaleTimeString()}`);
-        
-          // ✅ Tambahkan ini untuk global cooldown per token
-          const cooldownGlobalPath = "./cooldown.json";
-          const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
-            ? JSON.parse(fs.readFileSync(cooldownGlobalPath, "utf8"))
-            : {};
-        
-          cooldownGlobal[mintXStr] = pnlStore[posKey].cooldownUntil;
-          fs.writeFileSync(cooldownGlobalPath, JSON.stringify(cooldownGlobal, null, 2));
-        }
-        
-      
+                  
         // Cleanup & return
         pendingRemove.delete(posKey);
         console.log(`✅ Posisi ${posKey.slice(0, 6)} ditutup & token diswap ke SOL`);
