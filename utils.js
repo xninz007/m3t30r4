@@ -3,9 +3,10 @@ import {
   TOKEN_PROGRAM_ID,
   getAccount,
   getAssociatedTokenAddress,
+  createCloseAccountInstruction,
   createAssociatedTokenAccountIdempotent,
 } from "@solana/spl-token";
-import { Connection, PublicKey, SystemProgram, TransactionInstruction, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, TransactionInstruction, Transaction, sendAndConfirmTransaction, Keypair } from "@solana/web3.js";
 import { bs58PrivateKey, RPC } from "./config.js";
 import bs58 from "bs58";
 import { getPriorityInstructions } from "./lib/fee.js"; // pastikan path ini sesuai
@@ -71,34 +72,36 @@ export async function ensureAtaTokenAccount(connection, mint, user) {
 export async function autoUnwrapWsol(user) {
   const wsolMint = new PublicKey("So11111111111111111111111111111111111111112");
   const ata = await getAssociatedTokenAddress(wsolMint, user.publicKey);
-  const balance = await connection.getTokenAccountBalance(ata).catch(() => null);
-  if (!balance || balance.value.uiAmount === 0) {
-    return false;
+
+  let info;
+  try {
+    info = await getAccount(connection, ata);
+  } catch {
+    return false; // ATA tidak ada
   }
 
-  console.log(`💧 Unwrapping WSOL: ${balance.value.uiAmount} SOL`);
+  const amount = Number(info.amount);
+  if (amount === 0) return false;
+
+  console.log(`💧 Unwrapping WSOL: ${amount / 1e9} SOL`);
 
   const tx = new Transaction().add(
-    new TransactionInstruction({
-      keys: [
-        { pubkey: ata, isSigner: false, isWritable: true },
-        { pubkey: user.publicKey, isSigner: true, isWritable: true },
-      ],
-      programId: TOKEN_PROGRAM_ID,
-      data: Buffer.from([9]), // close account
-    })
+    createCloseAccountInstruction(
+      ata,
+      user.publicKey,
+      user.publicKey
+    )
   );
 
   try {
     const sig = await sendAndConfirmTransaction(connection, tx, [user]);
-    console.log("✅ WSOL unwrapped → SOL:", sig);
+    console.log("✅ WSOL berhasil di-unwrapped → SOL:", sig);
     return true;
   } catch (err) {
     console.warn("❌ Gagal unwrap WSOL:", err.message || err);
     return false;
   }
 }
-
 
 export async function getUserTokenBalanceNative(connection, mintAddress, pubkey) {
   try {
