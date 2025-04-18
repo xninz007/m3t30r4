@@ -2,7 +2,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
 import { autoAddLpSafe } from "./lib/prompt.js";
-import { getUserTokenBalanceNative } from "./utils.js";
+import { getUserTokenBalanceNative, autoUnwrapWsol } from "./utils.js";
 import dlmmPkg from "@meteora-ag/dlmm";
 const createDlmmPool = dlmmPkg.create || dlmmPkg.DLMM?.create || dlmmPkg.default?.create;
 import fetch from "node-fetch";
@@ -47,13 +47,14 @@ async function getTopTokens(timeframe = "5m") {
   const MAX_AGE_MS = (globalThis.RUNTIME_CONFIG?.MAX_AGE_HOUR || 12) * 60 * 60 * 1000;
   const MIN_VOLUME = globalThis.RUNTIME_CONFIG?.MIN_VOLUME || 1_000_000;
   const MIN_MCAP = globalThis.RUNTIME_CONFIG?.MIN_MCAP || 1_000_000;
+  const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
 
   return json.pools
     .filter(p => {
       const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
-      const isNew = Date.now() - new Date(p.baseAsset.firstPool?.createdAt || 0).getTime() < MAX_AGE_MS;
+      const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
       const mcap = p.baseAsset.mcap || 0;
-      return p.volume24h >= MIN_VOLUME && isSOL && isNew && mcap >= MIN_MCAP;
+      return p.volume24h >= MIN_VOLUME && isSOL && isNew && mcap >= MIN_MCAP && mcap <= MAX_MCAP;
     })
     .map(p => ({ ...p, score: getTokenScore(p) }))
     .sort((a, b) => b.score - a.score);
@@ -104,6 +105,7 @@ async function loadOrPromptConfig() {
     console.log(`🔹 Strategi    : ${cached.strategyType}`);
     console.log(`🔹 Min Volume  : ${cached.minVolume}`);
     console.log(`🔹 Min Mcap    : ${cached.minMcap}`);
+    console.log(`🔹 Max Mcap    : ${cached.maxMcap}`);
     console.log(`🔹 Max Age     : ${cached.maxAgeHour} jam`);
     console.log("–––––––––––––––––––––––––––––––––––––––––––");
 
@@ -180,6 +182,13 @@ async function loadOrPromptConfig() {
     },
     {
       type: "input",
+      name: "maxMcap",
+      message: "🔺 Maksimum Marketcap (misal: 100000000):",
+      default: "100000000",
+      validate: (val) => (!isNaN(val) && val > 0 ? true : "Harus angka positif"),
+    },    
+    {
+      type: "input",
       name: "maxAgeHour",
       message: "⏳ Maksimal umur token (jam):",
       default: "12",
@@ -201,6 +210,7 @@ export async function autoVolumeLoop() {
     anchorToken,
     minVolume,
     minMcap,
+    maxMcap,
     maxAgeHour,
   } = await loadOrPromptConfig();
 
@@ -214,6 +224,7 @@ export async function autoVolumeLoop() {
     MIN_VOLUME: parseFloat(minVolume),
     MIN_MCAP: parseFloat(minMcap),
     MAX_AGE_HOUR: parseFloat(maxAgeHour),
+    MAX_MCAP: parseFloat(maxMcap),
   };
 
   console.log("\n⚙️ Konfigurasi:");
@@ -227,11 +238,39 @@ export async function autoVolumeLoop() {
   console.log(`🔹 Strategi    : ${strategyType}`);
   console.log(`🔹 Min Volume  : ${minVolume}`);
   console.log(`🔹 Min Mcap    : ${minMcap}`);
+  console.log(`🔹 Max Mcap    : ${maxMcap}`);
   console.log(`🔹 Max Age     : ${maxAgeHour} jam`);
   console.log("–––––––––––––––––––––––––––––––––––––––––––");
   console.log("🚀 Memulai Auto Volume Mode (Multi-Wallet)...\n");
-  
 
+  // 🔍 Deteksi dan unwrap WSOL jika ada di semua wallet
+console.log("💧 Cek dan auto-unwrap WSOL yang tertinggal...");
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+for (const w of walletQueue) {
+  const pubkey = w.keypair.publicKey;
+  const short = pubkey.toBase58().slice(0, 6);
+  try {
+    const bal = await getUserTokenBalanceNative(connection, WSOL_MINT, pubkey);
+    if (bal > 0) {
+      const unwrapped = await autoUnwrapWsol(w.keypair);
+      if (unwrapped) {
+        console.log(`💧 [${short}] Unwrapped ${bal} WSOL ke SOL`);
+      } else {
+       // console.warn(`⚠️ [${short}] Gagal unwrap WSOL (balance ada, tapi gagal proses)`);
+      }
+    }
+    // else: tidak ada WSOL, tidak perlu log apapun
+  } catch (e) {
+    if (e.message?.includes("Associated Token Account does not exist")) {
+      // diam, ini bukan error kritis
+    } else {
+      console.warn(`⚠️ [${short}] Error cek WSOL:`, e.message || e);
+    }
+  }
+}
+
+  
   const REUSE_DELAY = 20 * 60 * 1000;
 
   while (true) {
@@ -255,22 +294,33 @@ export async function autoVolumeLoop() {
           const lastUsed = w.lastUsedMap[baseMint] || 0;
           const reuseTooSoon = walletQueue.length === 1 && (now - lastUsed < REUSE_DELAY);
           const walletShort = w.keypair.publicKey.toBase58().slice(0, 6);
-
+        
+          let maxDelayMsg = "";
+          let maxDelayMinutes = 0;
+        
           if (isCooldown) {
-            const remaining = Math.ceil((cooldownMap[baseMint] - now) / 60000);
-            console.log(`[${walletShort}] ⏳ Cooldown token ${symbol} selama ${remaining} menit lagi`);
+            const cd = Math.ceil((cooldownMap[baseMint] - now) / 60000);
+            if (cd > maxDelayMinutes) {
+              maxDelayMinutes = cd;
+              maxDelayMsg = `[${walletShort}] ⏳ Cooldown token ${symbol} selama ${cd} menit lagi`;
+            }
           }
         
           if (reuseTooSoon) {
-            const remaining = Math.ceil((REUSE_DELAY - (now - lastUsed)) / 60000);
-            console.log(`[${walletShort}] ⏳ Cooldown token ${symbol} selama ${remaining} menit lagi`);
+            const rd = Math.ceil((REUSE_DELAY - (now - lastUsed)) / 60000);
+            if (rd > maxDelayMinutes) {
+              maxDelayMinutes = rd;
+              maxDelayMsg = `[${walletShort}] ⏳ Reuse delay token ${symbol} selama ${rd} menit lagi`;
+            }
           }
+        
+          if (maxDelayMsg) console.log(maxDelayMsg);
         
           const usedPools = w.usedBaseMintMap[baseMint] || new Set();
           if (usedPools.size >= 2) {
             console.log(`🚫 [${walletShort}] Sudah LP 2 pool untuk token ${symbol}, skip`);
             continue;
-          } // ✅ limit 2 pool/token/wallet
+          }
         
           if (!alreadyUsed && !isCooldown && !reuseTooSoon) {
             walletSlot = w;
@@ -285,6 +335,7 @@ export async function autoVolumeLoop() {
             break;
           }
         }
+        
         
         if (!walletSlot) {
           console.log(`⚠️ Semua wallet cooldown atau sudah pakai token ${symbol}`);
@@ -351,6 +402,7 @@ export async function autoVolumeLoop() {
               mode: globalThis.RUNTIME_CONFIG.MODE,
               strategyType: globalThis.RUNTIME_CONFIG.STRATEGY,
               anchorAmountLamports: new BN(balX),
+              slippageBps: 300
             });
         
             addLpSuccess = true;
@@ -403,5 +455,30 @@ export async function autoVolumeLoop() {
     }
   }
 }
+
+// 🌊 WSOL Monitor: auto unwrap setiap 60 detik
+setInterval(async () => {
+  for (const w of walletQueue) {
+    const pubkey = w.keypair.publicKey;
+    const short = pubkey.toBase58().slice(0, 6);
+    try {
+      const bal = await getUserTokenBalanceNative(connection, "So11111111111111111111111111111111111111112", pubkey);
+      if (bal <= 0) continue;
+
+      const unwrapped = await autoUnwrapWsol(w.keypair);
+      if (unwrapped) {
+        console.log(`💧 [${short}] WSOL ${bal} berhasil di-unwrapped ke SOL`);
+      } else {
+        // console.warn(`⚠️ [${short}] Gagal unwrap WSOL (balance ada, tapi gagal proses)`);
+      }
+    } catch (e) {
+      if (!e.message?.includes("Associated Token Account does not exist")) {
+        console.warn(`⚠️ [${short}] Error saat cek WSOL:`, e.message || e);
+      }
+    }
+  }
+}, 60_000);
+
+
 
 autoVolumeLoop();
