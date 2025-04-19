@@ -54,11 +54,15 @@ async function getTopTokens(timeframe = "5m") {
       const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
       const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
       const mcap = p.baseAsset.mcap || 0;
-      return p.volume24h >= MIN_VOLUME && isSOL && isNew && mcap >= MIN_MCAP && mcap <= MAX_MCAP;
+      const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
+      const isScoreOk = scoreLabel === "medium" || scoreLabel === "high";
+
+      return p.volume24h >= MIN_VOLUME && isSOL && isNew && mcap >= MIN_MCAP && mcap <= MAX_MCAP && isScoreOk;
     })
-    .map(p => ({ ...p, score: getTokenScore(p) }))
+    .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
     .sort((a, b) => b.score - a.score);
 }
+
 
 async function getMatchingPool(baseMint) {
   const url = `https://app.meteora.ag/clmm-api/pair/all_by_groups?search_term=${baseMint}&limit=100`;
@@ -200,6 +204,7 @@ async function loadOrPromptConfig() {
   return config;
 }
 
+
 export async function autoVolumeLoop() {
   const {
     solAmount,
@@ -242,6 +247,12 @@ export async function autoVolumeLoop() {
   console.log(`🔹 Max Age     : ${maxAgeHour} jam`);
   console.log("–––––––––––––––––––––––––––––––––––––––––––");
   console.log("🚀 Memulai Auto Volume Mode (Multi-Wallet)...\n");
+  console.log("💰 Cek saldo SOL semua wallet:");
+for (const w of walletQueue) {
+  const pub = w.keypair.publicKey;
+  const bal = await connection.getBalance(pub);
+  console.log(`🔹 [${pub.toBase58().slice(0, 6)}] ${bal / 1e9} SOL`);
+}
 
   // 🔍 Deteksi dan unwrap WSOL jika ada di semua wallet
 console.log("💧 Cek dan auto-unwrap WSOL yang tertinggal...");
