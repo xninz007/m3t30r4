@@ -290,7 +290,7 @@ export async function monitorPnL(poolAddressStr, user) {
             const WSOL_MINT = "So11111111111111111111111111111111111111112";
             const MAX_RETRY = 10;
             let wsolBal = 0;
-        
+          
             console.log(`🔍 Cek saldo WSOL sebelum unwrap...`);
             for (let i = 0; i < MAX_RETRY; i++) {
               await delay(1500);
@@ -298,29 +298,36 @@ export async function monitorPnL(poolAddressStr, user) {
               console.log(`🔁 Cek saldo WSOL #${i + 1}: ${wsolBal}`);
               if (wsolBal > 0) break;
             }
-        
+          
             if (wsolBal > 0) {
+              console.log("⏳ Delay 5 detik sebelum mencoba unwrap WSOL...");
+              await delay(5000);
+          
               let unwrapped = false;
-              for (let retry = 0; retry < 2; retry++) {
+              for (let retry = 1; retry <= 3; retry++) {
                 unwrapped = await autoUnwrapWsol(user);
                 if (unwrapped) {
                   console.log(`💧 WSOL sebesar ${wsolBal} berhasil di-unwrapped ke SOL`);
+                  const finalBal = await connection.getBalance(publicKey);
+                  console.log(`💰 Balance setelah unwrap: ${finalBal / 1e9} SOL`);
                   break;
-                }
-                if (retry === 0) {
-                  console.log("⏳ Retry unwrap WSOL dalam 5 detik...");
-                  await delay(5000);
+                } else {
+                  if (retry < 3) {
+                    console.log(`⏳ Retry unwrap WSOL lagi dalam 5 detik (attempt ${retry + 1})...`);
+                    await delay(5000);
+                  }
                 }
               }
+          
               if (!unwrapped) {
-                console.warn(`⚠️ Gagal unwrap WSOL ke SOL setelah retry`);
+                console.warn(`⚠️ Gagal unwrap WSOL ke SOL setelah 3 percobaan`);
               }
-            
-            
+          
             } else {
               console.warn(`⚠️ Tidak ada WSOL untuk di-unwrapped setelah ${MAX_RETRY}x cek`);
             }
           }
+          
         
           pendingSwap.delete(posKey);
         } else {
