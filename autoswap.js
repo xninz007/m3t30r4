@@ -1,27 +1,30 @@
 import axios from "axios";
 import {
   Connection,
-  Keypair,
   VersionedTransaction,
+  Keypair,
 } from "@solana/web3.js";
-import bs58 from "bs58";
-import { bs58PrivateKey, RPC } from "./config.js";
+import { RPC } from "./config.js";
 import { ensureAtaTokenAccount } from "./utils.js";
 
-const user = Keypair.fromSecretKey(bs58.decode(bs58PrivateKey));
 const connection = new Connection(RPC);
 
 export async function autoSwap({
   inputMint,
   outputMint,
   amountInLamports,
+  signer, // ⬅️ Harus dikirim dari luar (Keypair)
   slippageBps = 100,
-  tryLegacy = false, // fallback legacy TX
+  tryLegacy = false,
 }) {
-  try {
-    const outputAta = await ensureAtaTokenAccount(connection, outputMint, user);
+  if (!signer || !signer.publicKey) {
+    throw new Error("Parameter 'signer' (Keypair) harus disediakan");
+  }
 
-    const quoteUrl = `https://ultra-api.jup.ag/proxy/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=${slippageBps}&swapMode=ExactIn&taker=${user.publicKey.toBase58()}&excludeDexes=Whirlpool`;
+  try {
+    await ensureAtaTokenAccount(connection, outputMint, signer);
+
+    const quoteUrl = `https://ultra-api.jup.ag/proxy/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountInLamports}&slippageBps=${slippageBps}&swapMode=ExactIn&taker=${signer.publicKey.toBase58()}&excludeDexes=Whirlpool`;
     const { data: quote } = await axios.get(quoteUrl);
     if (!quote?.outAmount) throw new Error("Quote tidak ditemukan");
 
@@ -29,7 +32,7 @@ export async function autoSwap({
       "https://ultra-api.jup.ag/proxy/swap?swapType=aggregator",
       {
         quoteResponse: quote,
-        userPublicKey: user.publicKey.toBase58(),
+        userPublicKey: signer.publicKey.toBase58(),
         wrapAndUnwrapSol: inputMint === "So11111111111111111111111111111111111111112",
         dynamicComputeUnitLimit: true,
         correctLastValidBlockHeight: true,
@@ -44,7 +47,7 @@ export async function autoSwap({
 
     const txBuffer = Buffer.from(swapRes.swapTransaction, "base64");
     const tx = VersionedTransaction.deserialize(txBuffer);
-    tx.sign([user]);
+    tx.sign([signer]);
 
     const sig = await connection.sendTransaction(tx, { skipPreflight: false });
     await connection.confirmTransaction(
@@ -64,11 +67,9 @@ export async function autoSwap({
     console.error("❌ Gagal swap:", logs);
     if (err.logs) console.warn("🪵 Logs:", err.logs);
 
-    // Fallback legacy tx if not already tried
     if (!tryLegacy) {
       console.warn("🔁 Coba ulang pakai legacy transaction...");
-      return autoSwap({ inputMint, outputMint, amountInLamports, slippageBps, tryLegacy: true });
+      return autoSwap({ inputMint, outputMint, amountInLamports, signer, slippageBps, tryLegacy: true });
     }
   }
 }
-
