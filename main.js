@@ -1,7 +1,7 @@
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
-import { autoAddLpSafe } from "./lib/prompt.js";
+import { autoAddLpSafe, isSafeBinRange } from "./lib/prompt.js";
 import { getUserTokenBalanceNative, autoUnwrapWsol } from "./utils.js";
 import dlmmPkg from "@meteora-ag/dlmm";
 const createDlmmPool = dlmmPkg.create || dlmmPkg.DLMM?.create || dlmmPkg.default?.create;
@@ -12,6 +12,20 @@ import inquirer from "inquirer";
 import { monitorPnL } from "./mon.js";
 import { getTokenScore } from "./scorer.js";
 import bs58 from "bs58";
+import * as util from 'util';
+import { saveTrackedSwap, runSwapTracker } from "./swaptracker.js";
+import { runHourlyCheck } from "./hourly.js";
+
+
+const logFile = fs.createWriteStream('bot.log', { flags: 'a' });
+const logStdout = process.stdout;
+
+console.log = function () {
+  logFile.write(util.format(...arguments) + '\n');
+  logStdout.write(util.format(...arguments) + '\n');
+};
+console.warn = console.error = console.log;
+
 
 const connection = new Connection(RPC, "confirmed");
 const BIN_STEPS = [80, 100, 125, 250];
@@ -27,6 +41,16 @@ const walletQueue = walletPrivates.map(pk => ({
 }));
 
 const monitoredPools = new Map();
+const walletActivePoolMap = new Map();
+
+function getTimestamp() {
+  const now = new Date();
+  const wib = new Date(now.getTime() + 7 * 60 * 60 * 1000); // tambah 7 jam
+  const date = wib.toISOString().split('T')[0]; // YYYY-MM-DD
+  const time = wib.toISOString().split('T')[1].split('.')[0]; // HH:MM:SS
+  return `[${time} WIB]`;
+}
+
 
 function delay(ms) {
   return new Promise(res => setTimeout(res, ms));
@@ -50,17 +74,28 @@ async function getTopTokens(timeframe = "5m") {
   const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
 
   return json.pools
-    .filter(p => {
-      const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
-      const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
-      const mcap = p.baseAsset.mcap || 0;
-      const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
-      const isScoreOk = scoreLabel === "medium" || scoreLabel === "high";
+  .filter(p => {
+    const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
+    const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
+    const mcap = p.baseAsset.mcap || 0;
+    const score = p.baseAsset.organicScore ?? 0;
+    const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
 
-      return p.volume24h >= MIN_VOLUME && isSOL && isNew && mcap >= MIN_MCAP && mcap <= MAX_MCAP && isScoreOk;
-    })
-    .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
-    .sort((a, b) => b.score - a.score);
+    // ✅ Medium/high harus >= 75
+    const isScoreOk =
+      (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
+
+    return (
+      p.volume24h >= MIN_VOLUME &&
+      isSOL &&
+      isNew &&
+      mcap >= MIN_MCAP &&
+      mcap <= MAX_MCAP &&
+      isScoreOk
+    );
+  })
+  .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
+  .sort((a, b) => b.score - a.score);
 }
 
 
@@ -123,7 +158,7 @@ async function loadOrPromptConfig() {
     ]);
 
     if (configAction === "Gunakan konfigurasi sebelumnya") {
-      console.log("✅ Menggunakan konfigurasi sebelumnya.");
+      console.log(`${getTimestamp()} ✅ Menggunakan konfigurasi sebelumnya.`);
       return cached;
     }
   }
@@ -198,6 +233,12 @@ async function loadOrPromptConfig() {
       default: "12",
       validate: (val) => (!isNaN(val) && val > 0 ? true : "Harus angka positif"),
     },
+    {
+      type: "confirm",
+      name: "onlyOnePositionPerWallet",
+      message: "🚧 Batasi 1 posisi aktif per wallet?",
+      default: true,
+    },
   ]);
 
   fs.writeFileSync(CONFIG_CACHE_PATH, JSON.stringify(config, null, 2));
@@ -217,6 +258,7 @@ export async function autoVolumeLoop() {
     minMcap,
     maxMcap,
     maxAgeHour,
+    onlyOnePositionPerWallet,
   } = await loadOrPromptConfig();
 
   globalThis.RUNTIME_CONFIG = {
@@ -230,6 +272,7 @@ export async function autoVolumeLoop() {
     MIN_MCAP: parseFloat(minMcap),
     MAX_AGE_HOUR: parseFloat(maxAgeHour),
     MAX_MCAP: parseFloat(maxMcap),
+    onlyOnePositionPerWallet,
   };
 
   console.log("\n⚙️ Konfigurasi:");
@@ -251,11 +294,11 @@ export async function autoVolumeLoop() {
 for (const w of walletQueue) {
   const pub = w.keypair.publicKey;
   const bal = await connection.getBalance(pub);
-  console.log(`🔹 [${pub.toBase58().slice(0, 6)}] ${bal / 1e9} SOL`);
+  console.log(`${getTimestamp()} 🔹 [${pub.toBase58().slice(0, 6)}] ${bal / 1e9} SOL`);
 }
 
   // 🔍 Deteksi dan unwrap WSOL jika ada di semua wallet
-console.log("💧 Cek dan auto-unwrap WSOL yang tertinggal...");
+console.log(`${getTimestamp()} 💧 Cek dan auto-unwrap WSOL yang tertinggal...`);
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 for (const w of walletQueue) {
@@ -266,7 +309,7 @@ for (const w of walletQueue) {
     if (bal > 0) {
       const unwrapped = await autoUnwrapWsol(w.keypair);
       if (unwrapped) {
-        console.log(`💧 [${short}] Unwrapped ${bal} WSOL ke SOL`);
+        console.log(`${getTimestamp()} 💧 [${short}] Unwrapped ${bal} WSOL ke SOL`);
       } else {
        // console.warn(`⚠️ [${short}] Gagal unwrap WSOL (balance ada, tapi gagal proses)`);
       }
@@ -276,7 +319,7 @@ for (const w of walletQueue) {
     if (e.message?.includes("Associated Token Account does not exist")) {
       // diam, ini bukan error kritis
     } else {
-      console.warn(`⚠️ [${short}] Error cek WSOL:`, e.message || e);
+      console.warn(`${getTimestamp()} ⚠️ [${short}] Error cek WSOL:`, e.message || e);
     }
   }
 }
@@ -313,7 +356,7 @@ for (const w of walletQueue) {
             const cd = Math.ceil((cooldownMap[baseMint] - now) / 60000);
             if (cd > maxDelayMinutes) {
               maxDelayMinutes = cd;
-              maxDelayMsg = `[${walletShort}] ⏳ Cooldown token ${symbol} selama ${cd} menit lagi`;
+              maxDelayMsg = `${getTimestamp()} [${walletShort}] ⏳ Cooldown token ${symbol} selama ${cd} menit lagi`;
             }
           }
         
@@ -321,15 +364,15 @@ for (const w of walletQueue) {
             const rd = Math.ceil((REUSE_DELAY - (now - lastUsed)) / 60000);
             if (rd > maxDelayMinutes) {
               maxDelayMinutes = rd;
-              maxDelayMsg = `[${walletShort}] ⏳ Reuse delay token ${symbol} selama ${rd} menit lagi`;
+              maxDelayMsg = `${getTimestamp()} [${walletShort}] ⏳ Reuse delay token ${symbol} selama ${rd} menit lagi`;
             }
           }
         
           if (maxDelayMsg) console.log(maxDelayMsg);
         
           const usedPools = w.usedBaseMintMap[baseMint] || new Set();
-          if (usedPools.size >= 2) {
-            console.log(`🚫 [${walletShort}] Sudah LP 2 pool untuk token ${symbol}, skip`);
+          if (usedPools.size >= 1) {
+            console.log(`${getTimestamp()} 🚫 [${walletShort}] Sudah LP 1 pool untuk token ${symbol}, skip`);
             continue;
           }
         
@@ -342,69 +385,127 @@ for (const w of walletQueue) {
           if (alreadyUsed && walletQueue.length === 1 && !isCooldown && !reuseTooSoon) {
             walletSlot = w;
             w.lastUsedMap[baseMint] = now;
-            console.log(`♻️ Wallet tunggal reuse token: ${symbol}`);
+            console.log(`${getTimestamp()} ♻️ Wallet tunggal reuse token: ${symbol}`);
             break;
           }
         }
         
         
         if (!walletSlot) {
-          console.log(`⚠️ Semua wallet cooldown atau sudah pakai token ${symbol}`);
+          console.log(`${getTimestamp()} ⚠️ Semua wallet cooldown atau sudah pakai token ${symbol}`);
           continue;
         }
+
+        if (globalThis.RUNTIME_CONFIG.onlyOnePositionPerWallet) {
+          const activePool = walletActivePoolMap.get(walletSlot.keypair.publicKey.toBase58());
+          if (activePool) {
+            console.log(`${getTimestamp()} ⛔ Wallet ${walletSlot.keypair.publicKey.toBase58().slice(0, 6)} masih punya posisi aktif di pool ${activePool}, skip`);
+            continue;
+          }
+        }
+        
         
 
         const { keypair, usedTokens } = walletSlot;
         const pubkey = keypair.publicKey;
         const walletName = `${pubkey.toBase58().slice(0, 6)}...`;
 
-        console.log(`🚨 Token HOT: ${symbol} | Wallet: ${walletName} | (Score: ${token.score.toFixed(2)})`);
-        console.log("🔍 Pool:", poolAddress);
+        console.log(`${getTimestamp()} 🚨 Token HOT: ${symbol} | Wallet: ${walletName} | (Score: ${token.score.toFixed(2)})`);
+        console.log(`${getTimestamp()} 🔍 Pool:`, poolAddress);
 
         const dlmmPool = await createDlmmPool(connection, new PublicKey(poolAddress));
+        // Hitung minBin dan maxBin sesuai mode dan anchor
+        const activeBin = await dlmmPool.getActiveBin();
+        let minBinId = 0;
+        let maxBinId = 0;
+        
+        if (mode === "50:50") {
+          minBinId = activeBin.binId - 34;
+          maxBinId = activeBin.binId + 34;
+        } else if (mode === "One Side Tokens") {
+          if (anchorToken === "X") {
+            minBinId = activeBin.binId;
+            maxBinId = activeBin.binId + 68;
+          } else {
+            minBinId = activeBin.binId - 68;
+            maxBinId = activeBin.binId;
+          }
+        }
+        
+        const isSafe = await isSafeBinRange(dlmmPool, minBinId, maxBinId);
+        if (!isSafe) {
+          console.log(`${getTimestamp()} ⚠️ Bin range belum aktif → SKIP token ${symbol} karena biaya rent non-refundable`);
+          continue;
+        }
 
         let balX = 0;
         let shouldSkipSwap = mode === "One Side Tokens" && anchorToken === "Y";
 
         if (!shouldSkipSwap) {
           for (let attempt = 1; attempt <= 3; attempt++) {
-            console.log(`🔁 Swap attempt #${attempt}`);
+            console.log(`${getTimestamp()} 🔁 Swap attempt #${attempt}`);
             try {
-              const swapSig = await autoSwap({
+              const sig = await autoSwap({
                 inputMint: "So11111111111111111111111111111111111111112",
                 outputMint: baseMint,
                 amountInLamports: globalThis.RUNTIME_CONFIG.MODAL_LAMPORTS,
                 signer: keypair,
               });
-              console.log("🔁 Swap TX:", swapSig);
+        
+              if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
+                throw new Error("Swap gagal: signature tidak valid.");
+              }
+        
+              const txInfo = await connection.getTransaction(sig, {
+                commitment: "confirmed",
+                maxSupportedTransactionVersion: 0,
+              });
+        
+              if (txInfo?.meta?.err) {
+                console.warn(`${getTimestamp()} ❌ TX Swap gagal secara on-chain (custom error):`, txInfo.meta.err);
+                throw new Error("TX failed on-chain");
+              }
+        
+              console.log(`${getTimestamp()} ✅ Swap sukses. TX:`, sig);
+        
+              // ✅ Cek apakah token sudah masuk ke wallet
+              for (let i = 0; i < 10; i++) {
+                await delay(1500);
+                balX = await getUserTokenBalanceNative(connection, baseMint, pubkey);
+                if (balX > 0) {
+                  saveTrackedSwap(baseMint, pubkey.toBase58());
+                  break;
+                }
+              }
+              
+        
+              break; // keluar dari loop swap jika tidak throw error
             } catch (e) {
-              console.warn(`❌ Swap gagal attempt #${attempt}:`, e.message || e);
-              continue;
+              console.warn(`${getTimestamp()} ❌ Swap gagal attempt #${attempt}:`, e.message || e);
+              await delay(2000);
             }
-
-            for (let i = 0; i < 5; i++) {
-              await delay(1500);
-              balX = await getUserTokenBalanceNative(connection, baseMint, pubkey);
-              if (balX > 0) break;
-            }
-
-            if (balX > 0) break;
-            console.warn("⏳ Token belum masuk. Retry swap...");
+          }
+        
+          if (balX === 0) {
+            console.warn(`${getTimestamp()} ❌ Token tidak masuk setelah 3 kali swap. Batalkan.`);
+            walletSlot.lastUsedMap[baseMint] = 0;
+            continue;
           }
 
-          if (balX === 0) {
-            console.warn("❌ Token tidak masuk setelah 3 kali swap. Batalkan.");
+          if (balX < 16000) {
+            console.log(`${getTimestamp()} ⚠️ Jumlah token X terlalu kecil untuk add LP, skip.`);
             walletSlot.lastUsedMap[baseMint] = 0;
             continue;
           }
         } else {
-          console.log("⏭️ Swap dilewati: One Side Token Y (SOL)");
+          console.log(`${getTimestamp()} ⏭️ Swap dilewati: One Side Token Y (SOL)`);
         }
+        
 
         let addLpSuccess = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            console.log(`➕ Add LP attempt #${attempt}`);
+            console.log(`${getTimestamp()} ➕ Add LP attempt #${attempt}`);
             const result = await autoAddLpSafe({
               connection,
               dlmmPool,
@@ -419,29 +520,84 @@ for (const w of walletQueue) {
             addLpSuccess = true;
             break;
           } catch (e) {
-            console.warn(`❌ Add LP gagal (attempt ${attempt}):`, e.message || e);
+            console.warn(`${getTimestamp()} ❌ Add LP gagal (attempt ${attempt}):`, e.message || e);
             await delay(2000);
           }
         }
         
         if (!addLpSuccess) {
-          console.warn("❌ Gagal add LP setelah 3 percobaan. Skip token.");
+          console.warn(`${getTimestamp()} ❌ Gagal add LP setelah 3 percobaan. Skip token.`);
+        
+          try {
+            const balTokenX = await getUserTokenBalanceNative(connection, baseMint, keypair.publicKey);
+            if (balTokenX > 0) {
+              console.log(`${getTimestamp()} 🔄 Swap kembali ${symbol} ke SOL karena gagal add LP...`);
+              await delay(2000);
+        
+              let swapSuccess = false;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  console.log(`🔁 Swap ke SOL attempt #${attempt}`);
+                  const sig = await autoSwap({
+                    inputMint: baseMint,
+                    outputMint: "So11111111111111111111111111111111111111112", // SOL
+                    amountInLamports: balTokenX,
+                    signer: keypair,
+                  });
+        
+                  if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
+                    throw new Error("Swap gagal: signature tidak valid.");
+                  }
+        
+                  const txInfo = await connection.getTransaction(sig, {
+                    commitment: "confirmed",
+                    maxSupportedTransactionVersion: 0,
+                  });
+        
+                  if (txInfo?.meta?.err) {
+                    console.warn(`${getTimestamp()} ❌ TX Swap gagal secara on-chain (custom error):`, txInfo.meta.err);
+                    throw new Error("TX failed on-chain");
+                  }
+        
+                  console.log(`${getTimestamp()} ✅ Swap ke SOL sukses. TX:`, sig);
+                  swapSuccess = true;
+                  break;
+                } catch (e) {
+                  console.warn(`${getTimestamp()} ⚠️ Swap ke SOL gagal attempt #${attempt}:`, e.message || e);
+                  await delay(2000);
+                }
+              }
+        
+              if (!swapSuccess) {
+                console.warn(`${getTimestamp()} ❌ Gagal swap ${symbol} ke SOL setelah 3 percobaan.`);
+              }
+            } else {
+              console.log(`${getTimestamp()} ℹ️ Tidak ada sisa token ${symbol} untuk di-swap ke SOL.`);
+            }
+          } catch (e) {
+            console.warn(`${getTimestamp()} ⚠️ Gagal cek balance token X (${symbol}):`, e.message || e);
+          }
+        
           continue;
         }
+        
+        
         
         if (!walletSlot.usedBaseMintMap[baseMint]) {
           walletSlot.usedBaseMintMap[baseMint] = new Set();
         }
         walletSlot.usedBaseMintMap[baseMint].add(poolAddress);
+        walletActivePoolMap.set(pubkey.toBase58(), poolAddress); // 🧠 Tandai posisi aktif
         
 
-        console.log("📡 Monitor PnL dimulai:", poolAddress);
+        console.log(`${getTimestamp()} 📡 Monitor PnL dimulai:`, poolAddress);
         const intervalId = setInterval(async () => {
           const result = await monitorPnL(poolAddress, keypair);
 
           if (result?.closed) {
             clearInterval(monitoredPools.get(poolAddress));
             monitoredPools.delete(poolAddress);
+            walletActivePoolMap.delete(pubkey.toBase58()); // 🧹 Hapus posisi aktif
           
             walletSlot.usedTokens.delete(result.baseMint);
             walletSlot.usedBaseMintMap?.[result.baseMint]?.delete(result.pool);
@@ -449,7 +605,7 @@ for (const w of walletQueue) {
               delete walletSlot.usedBaseMintMap[result.baseMint];
             }
           
-            console.log("🧹 Pool & token dibersihkan dari slot wallet:", result.baseMint);
+            console.log(`${getTimestamp()} 🧹 Pool & token dibersihkan dari slot wallet:`, result.baseMint);
           }
           
         }, 10_000);
@@ -458,7 +614,7 @@ for (const w of walletQueue) {
         monitoredPools.set(poolAddress, intervalId);
         usedTokens.add(baseMint);
       }
-      console.log("⏳ Tunggu 1 menit sebelum scan token baru...");
+      console.log(`${getTimestamp()} ⏳ Tunggu 1 menit sebelum scan token baru...`);
       await delay(60_000);
     } catch (err) {
       console.error("❌ Error:", err.message || err);
@@ -478,18 +634,20 @@ setInterval(async () => {
 
       const unwrapped = await autoUnwrapWsol(w.keypair);
       if (unwrapped) {
-        console.log(`💧 [${short}] WSOL ${bal} berhasil di-unwrapped ke SOL`);
+        console.log(`${getTimestamp()} 💧 [${short}] WSOL ${bal} berhasil di-unwrapped ke SOL`);
       } else {
         // console.warn(`⚠️ [${short}] Gagal unwrap WSOL (balance ada, tapi gagal proses)`);
       }
     } catch (e) {
       if (!e.message?.includes("Associated Token Account does not exist")) {
-        console.warn(`⚠️ [${short}] Error saat cek WSOL:`, e.message || e);
+        console.warn(`${getTimestamp()} ⚠️ [${short}] Error saat cek WSOL:`, e.message || e);
       }
     }
   }
 }, 60_000);
 
-
+runSwapTracker(connection, walletQueue);
+setInterval(() => runSwapTracker(connection, walletQueue), 10 * 60 * 1000);
+setInterval(() => runHourlyCheck(walletQueue), 60 * 60 * 1000);
 
 autoVolumeLoop();
