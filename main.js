@@ -1,3 +1,4 @@
+// update jam 16.34 22 April 2025
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
@@ -516,9 +517,37 @@ for (const w of walletQueue) {
               anchorAmountLamports: new BN(balX),
               slippageBps: 300
             });
-        
+
+            // ✅ Validasi: pastikan posisi benar-benar terbuka
+            let positionDetected = false;
+            for (let retry = 1; retry <= 5; retry++) {
+              const userPositions = await dlmmPool.getPositionsByUserAndLbPair(keypair.publicKey);
+              if (userPositions?.userPositions?.length) {
+                positionDetected = true;
+                break;
+              }
+              console.log(`${getTimestamp()} ⏳ Cek posisi retry #${retry} belum terdeteksi...`);
+              await delay(2000);
+            }
+            
+            if (!positionDetected) {
+              console.warn(`${getTimestamp()} ❌ Tidak ada posisi terbuka setelah Add LP (setelah 5x cek), kemungkinan gagal parsial. Skip token.`);
+              
+              walletSlot.usedTokens.delete(baseMint);
+              walletSlot.usedBaseMintMap?.[baseMint]?.delete(poolAddress);
+              if (walletSlot.usedBaseMintMap?.[baseMint]?.size === 0) {
+                delete walletSlot.usedBaseMintMap[baseMint];
+              }
+            
+              walletActivePoolMap.delete(pubkey.toBase58()); // Tambahan pembersih pool aktif
+              addLpSuccess = false;
+              break;
+            }
+            
+            
             addLpSuccess = true;
             break;
+            
           } catch (e) {
             console.warn(`${getTimestamp()} ❌ Add LP gagal (attempt ${attempt}):`, e.message || e);
             await delay(2000);
@@ -611,8 +640,10 @@ for (const w of walletQueue) {
         }, 10_000);
         
 
-        monitoredPools.set(poolAddress, intervalId);
-        usedTokens.add(baseMint);
+        if (addLpSuccess) {
+          monitoredPools.set(poolAddress, intervalId);
+          usedTokens.add(baseMint);
+        }
       }
       console.log(`${getTimestamp()} ⏳ Tunggu 1 menit sebelum scan token baru...`);
       await delay(60_000);
@@ -647,7 +678,7 @@ setInterval(async () => {
 }, 60_000);
 
 runSwapTracker(connection, walletQueue);
-setInterval(() => runSwapTracker(connection, walletQueue), 10 * 60 * 1000);
+setInterval(() => runSwapTracker(connection, walletQueue), 60 * 60 * 1000);
 setInterval(() => runHourlyCheck(walletQueue), 60 * 60 * 1000);
 
 autoVolumeLoop();
