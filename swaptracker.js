@@ -48,29 +48,33 @@ export async function runSwapTracker(connection, walletQueue) {
       continue;
     }
 
-    try {
-      console.log(`[${getTimestamp()}] 🔄 Swap ulang ${entry.baseMint.slice(0, 6)} ke SOL...`);
-      const sig = await autoSwap({
-        inputMint: entry.baseMint,
-        outputMint: WSOL_MINT,
-        amountInLamports: balance,
-        signer,
-      });
+    for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+      try {
+        console.log(`[${getTimestamp()}] 🔄 Swap ulang ${entry.baseMint.slice(0, 6)} ke SOL (attempt ${attempt})...`);
+        const sig = await autoSwap({
+          inputMint: entry.baseMint,
+          outputMint: WSOL_MINT,
+          amountInLamports: balance,
+          signer,
+        });
 
-      if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
-        throw new Error("Swap gagal: signature tidak valid.");
-      }
-      
-      console.log(`[${getTimestamp()}] ✅ Swap sukses: ${sig}`);
-      delete data[key];
-    } catch (e) {
-      entry.retryCount = (entry.retryCount || 0) + 1;
-      console.warn(`[${getTimestamp()}] ❌ Swap gagal (${entry.baseMint}): ${e.message || e}`);
-      if (entry.retryCount >= MAX_RETRY) {
-        console.warn(`[${getTimestamp()}] 🧹 Hapus ${entry.baseMint} setelah ${entry.retryCount}x gagal swap`);
+        if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
+          throw new Error("Swap gagal: signature tidak valid.");
+        }
+
+        console.log(`[${getTimestamp()}] ✅ Swap sukses: ${sig}`);
         delete data[key];
+        break;
+      } catch (e) {
+        entry.retryCount = (entry.retryCount || 0) + 1;
+        console.warn(`[${getTimestamp()}] ❌ Swap gagal (attempt ${attempt}) untuk ${entry.baseMint}: ${e.message || e}`);
+        if (entry.retryCount >= MAX_RETRY || attempt === MAX_RETRY) {
+          console.warn(`[${getTimestamp()}] 🧹 Hapus ${entry.baseMint} setelah ${entry.retryCount}x gagal swap`);
+          delete data[key];
+        } else {
+          await new Promise(res => setTimeout(res, 2000));
+        }
       }
-      await new Promise(res => setTimeout(res, 2000));
     }
   }
 
