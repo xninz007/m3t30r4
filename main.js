@@ -1,4 +1,4 @@
-// update jam 16.34 22 April 2025
+// update jam 8.26 23 April 2025
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
@@ -379,9 +379,12 @@ for (const w of walletQueue) {
         
           if (!alreadyUsed && !isCooldown && !reuseTooSoon) {
             walletSlot = w;
-            w.lastUsedMap[baseMint] = now;
+            if (globalThis.RUNTIME_CONFIG.ANCHOR === "X") {
+              w.lastUsedMap[baseMint] = now; // hanya set reuse awal jika anchor X
+            }
             break;
           }
+          
         
           if (alreadyUsed && walletQueue.length === 1 && !isCooldown && !reuseTooSoon) {
             walletSlot = w;
@@ -489,8 +492,13 @@ for (const w of walletQueue) {
         
           if (balX === 0) {
             console.warn(`${getTimestamp()} ❌ Token tidak masuk setelah 3 kali swap. Batalkan.`);
-            walletSlot.lastUsedMap[baseMint] = 0;
+            if (globalThis.RUNTIME_CONFIG.ANCHOR === "X") {
+              walletSlot.lastUsedMap[baseMint] = Date.now();
+            } else {
+              walletSlot.lastUsedMap[baseMint] = 0;
+            }            
             continue;
+          
           }
 
           if (balX < 16000) {
@@ -517,7 +525,7 @@ for (const w of walletQueue) {
               anchorAmountLamports: new BN(balX),
               slippageBps: 300
             });
-
+        
             // ✅ Validasi: pastikan posisi benar-benar terbuka
             let positionDetected = false;
             for (let retry = 1; retry <= 5; retry++) {
@@ -529,30 +537,36 @@ for (const w of walletQueue) {
               console.log(`${getTimestamp()} ⏳ Cek posisi retry #${retry} belum terdeteksi...`);
               await delay(2000);
             }
-            
+        
             if (!positionDetected) {
               console.warn(`${getTimestamp()} ❌ Tidak ada posisi terbuka setelah Add LP (setelah 5x cek), kemungkinan gagal parsial. Skip token.`);
-              
+        
               walletSlot.usedTokens.delete(baseMint);
               walletSlot.usedBaseMintMap?.[baseMint]?.delete(poolAddress);
               if (walletSlot.usedBaseMintMap?.[baseMint]?.size === 0) {
                 delete walletSlot.usedBaseMintMap[baseMint];
               }
-            
+        
               walletActivePoolMap.delete(pubkey.toBase58()); // Tambahan pembersih pool aktif
+        
+              // ✅ Tambah reuse delay sesuai anchor
+              if (globalThis.RUNTIME_CONFIG.ANCHOR === "X" || globalThis.RUNTIME_CONFIG.ANCHOR === "Y") {
+                walletSlot.lastUsedMap[baseMint] = Date.now();
+              }
+        
               addLpSuccess = false;
               break;
             }
-            
-            
+        
             addLpSuccess = true;
             break;
-            
+        
           } catch (e) {
             console.warn(`${getTimestamp()} ❌ Add LP gagal (attempt ${attempt}):`, e.message || e);
             await delay(2000);
           }
         }
+        
         
         if (!addLpSuccess) {
           console.warn(`${getTimestamp()} ❌ Gagal add LP setelah 3 percobaan. Skip token.`);
@@ -678,7 +692,7 @@ setInterval(async () => {
 }, 60_000);
 
 runSwapTracker(connection, walletQueue);
-setInterval(() => runSwapTracker(connection, walletQueue), 60 * 60 * 1000);
+setInterval(() => runSwapTracker(connection, walletQueue), 5 * 60 * 1000);
 setInterval(() => runHourlyCheck(walletQueue), 60 * 60 * 1000);
 
 autoVolumeLoop();
