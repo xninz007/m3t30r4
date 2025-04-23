@@ -56,6 +56,11 @@ export async function runSwapTracker(connection, walletQueue) {
         amountInLamports: balance,
         signer,
       });
+
+      if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
+        throw new Error("Swap gagal: signature tidak valid.");
+      }
+      
       console.log(`[${getTimestamp()}] ✅ Swap sukses: ${sig}`);
       delete data[key];
     } catch (e) {
@@ -65,6 +70,7 @@ export async function runSwapTracker(connection, walletQueue) {
         console.warn(`[${getTimestamp()}] 🧹 Hapus ${entry.baseMint} setelah ${entry.retryCount}x gagal swap`);
         delete data[key];
       }
+      await new Promise(res => setTimeout(res, 2000));
     }
   }
 
