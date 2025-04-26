@@ -75,31 +75,29 @@ async function getTopTokens(timeframe = "5m") {
   const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
 
   return json.pools
-    .filter(p => {
-      const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
-      const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
-      const mcap = p.baseAsset.mcap || 0;
-      const score = p.baseAsset.organicScore ?? 0;
-      const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
-      const vol5m = p.stats5m?.buyVolume + p.stats5m?.sellVolume || 0;
+  .filter(p => {
+    const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
+    const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
+    const mcap = p.baseAsset.mcap || 0;
+    const score = p.baseAsset.organicScore ?? 0;
+    const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
 
-      const isScoreOk =
-        (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
+    // ✅ Medium/high harus >= 75
+    const isScoreOk =
+      (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
 
-      return (
-        vol5m >= MIN_VOLUME &&
-        isSOL &&
-        isNew &&
-        mcap >= MIN_MCAP &&
-        mcap <= MAX_MCAP &&
-        isScoreOk
-      );
-    })
-    .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
-    .sort((a, b) => b.score - a.score);
+    return (
+      p.volume24h >= MIN_VOLUME &&
+      isSOL &&
+      isNew &&
+      mcap >= MIN_MCAP &&
+      mcap <= MAX_MCAP &&
+      isScoreOk
+    );
+  })
+  .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
+  .sort((a, b) => b.score - a.score);
 }
-
-
 
 async function getMatchingPool(baseMint) {
   const url = `https://app.meteora.ag/clmm-api/pair/all_by_groups?search_term=${baseMint}&limit=100`;
