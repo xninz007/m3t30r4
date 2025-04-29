@@ -1,4 +1,4 @@
-// update jam 8.26 23 April 2025
+// update jam 12.56 29 April 2025
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
@@ -16,7 +16,7 @@ import bs58 from "bs58";
 import * as util from 'util';
 import { saveTrackedSwap, runSwapTracker } from "./swaptracker.js";
 import { runHourlyCheck } from "./hourly.js";
-
+import { calculateMeteorScore } from "./calculateMeteorScore.js";
 
 const logFile = fs.createWriteStream('bot.log', { flags: 'a' });
 const logStdout = process.stdout;
@@ -64,40 +64,58 @@ function loadCooldownMap() {
 }
 
 async function getTopTokens(timeframe = "5m") {
-  const url = `https://datapi.jup.ag/v1/pools/toporganicscore/${timeframe}`;
-  await delay(1000);
-  const res = await fetch(url);
-  const json = await res.json();
+  if (globalThis.MODE_TYPE === "mode1") {
+    // Mode 1 - pakai data dari Jupiter
+    const url = `https://datapi.jup.ag/v1/pools/toporganicscore/${timeframe}`;
+    await delay(1000);
+    const res = await fetch(url);
+    const json = await res.json();
 
-  const MAX_AGE_MS = (globalThis.RUNTIME_CONFIG?.MAX_AGE_HOUR || 12) * 60 * 60 * 1000;
-  const MIN_VOLUME = globalThis.RUNTIME_CONFIG?.MIN_VOLUME || 1_000_000;
-  const MIN_MCAP = globalThis.RUNTIME_CONFIG?.MIN_MCAP || 1_000_000;
-  const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
+    const MAX_AGE_MS = (globalThis.RUNTIME_CONFIG?.MAX_AGE_HOUR || 12) * 60 * 60 * 1000;
+    const MIN_AGE_MS = (globalThis.RUNTIME_CONFIG?.MIN_AGE_HOUR || 1) * 60 * 60 * 1000;
+    const MIN_VOLUME = globalThis.RUNTIME_CONFIG?.MIN_VOLUME || 1_000_000;
+    const MIN_MCAP = globalThis.RUNTIME_CONFIG?.MIN_MCAP || 1_000_000;
+    const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
 
-  return json.pools
-  .filter(p => {
-    const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
-    const isNew = Date.now() - new Date(p.createdAt || 0).getTime() < MAX_AGE_MS;
-    const mcap = p.baseAsset.mcap || 0;
-    const score = p.baseAsset.organicScore ?? 0;
-    const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
+    const filtered = json.pools
+      .filter(p => {
+        const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
+        const age = Date.now() - new Date(p.createdAt || 0).getTime();
+        const isAgeOk = age >= MIN_AGE_MS && age <= MAX_AGE_MS;
+        const mcap = p.baseAsset.mcap || 0;
+        const score = p.baseAsset.organicScore ?? 0;
+        const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
+        const isScoreOk = (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
 
-    // ✅ Medium/high harus >= 75
-    const isScoreOk =
-      (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
+        return (
+          p.volume24h >= MIN_VOLUME &&
+          isSOL &&
+          isAgeOk &&
+          mcap >= MIN_MCAP &&
+          mcap <= MAX_MCAP &&
+          isScoreOk
+        );
+      })
+      .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
+      .sort((a, b) => b.score - a.score);
 
-    return (
-      p.volume24h >= MIN_VOLUME &&
-      isSOL &&
-      isNew &&
-      mcap >= MIN_MCAP &&
-      mcap <= MAX_MCAP &&
-      isScoreOk
-    );
-  })
-  .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
-  .sort((a, b) => b.score - a.score);
+    globalThis.topTokens = filtered;
+    console.log(`✅ [Top Organic] ${globalThis.topTokens.length} tokens di-load`);
+  } else if (globalThis.MODE_TYPE === "mode2") {
+    // Mode 2 - pakai calculateMeteorScore
+    await calculateMeteorScore();
+
+    const data = JSON.parse(fs.readFileSync("meteor_score_v2.json", "utf-8"));
+    globalThis.topTokens = data.map(d => ({
+      mintX: d.mintX,
+      address: d.address,
+      symbol: d.symbol,
+      score: d.meteorScore,
+    }));
+    console.log(`✅ [MeteoraScore] ${globalThis.topTokens.length} tokens di-load`);
+  }
 }
+
 
 async function getMatchingPool(baseMint) {
   const url = `https://app.meteora.ag/clmm-api/pair/all_by_groups?search_term=${baseMint}&limit=100`;
@@ -124,6 +142,19 @@ async function getMatchingPool(baseMint) {
   return bestPool;
 }
 
+const { mode } = await inquirer.prompt([
+  {
+    type: "list",
+    name: "mode",
+    message: "Pilih Mode Auto Volume:",
+    choices: [
+      { name: "Mode 1 - Top Organic Jupiter", value: "mode1" },
+      { name: "Mode 2 - Meteora Score Filtering", value: "mode2" },
+    ],
+  },
+]);
+globalThis.MODE_TYPE = mode;
+
 async function loadOrPromptConfig() {
   let cached = null;
   if (fs.existsSync(CONFIG_CACHE_PATH)) {
@@ -145,6 +176,7 @@ async function loadOrPromptConfig() {
     console.log(`🔹 Min Volume  : ${cached.minVolume}`);
     console.log(`🔹 Min Mcap    : ${cached.minMcap}`);
     console.log(`🔹 Max Mcap    : ${cached.maxMcap}`);
+    console.log(`🔹 Min Age     : ${cached.minAgeHour} jam`);
     console.log(`🔹 Max Age     : ${cached.maxAgeHour} jam`);
     console.log("–––––––––––––––––––––––––––––––––––––––––––");
 
@@ -225,7 +257,14 @@ async function loadOrPromptConfig() {
       message: "🔺 Maksimum Marketcap (misal: 100000000):",
       default: "100000000",
       validate: (val) => (!isNaN(val) && val > 0 ? true : "Harus angka positif"),
-    },    
+    },
+    {
+      type: "input",
+      name: "minAgeHour",
+      message: "⏳ Minimal umur token (jam):",
+      default: "1",
+      validate: (val) => (!isNaN(val) && val >= 0 ? true : "Harus angka >= 0"),
+    },        
     {
       type: "input",
       name: "maxAgeHour",
@@ -257,6 +296,7 @@ export async function autoVolumeLoop() {
     minVolume,
     minMcap,
     maxMcap,
+    minAgeHour,
     maxAgeHour,
     onlyOnePositionPerWallet,
   } = await loadOrPromptConfig();
@@ -270,6 +310,7 @@ export async function autoVolumeLoop() {
     ANCHOR: anchorToken || "X",
     MIN_VOLUME: parseFloat(minVolume),
     MIN_MCAP: parseFloat(minMcap),
+    MIN_AGE_HOUR: parseFloat(minAgeHour),
     MAX_AGE_HOUR: parseFloat(maxAgeHour),
     MAX_MCAP: parseFloat(maxMcap),
     onlyOnePositionPerWallet,
@@ -287,6 +328,7 @@ export async function autoVolumeLoop() {
   console.log(`🔹 Min Volume  : ${minVolume}`);
   console.log(`🔹 Min Mcap    : ${minMcap}`);
   console.log(`🔹 Max Mcap    : ${maxMcap}`);
+  console.log(`🔹 Min Age     : ${minAgeHour} jam`);
   console.log(`🔹 Max Age     : ${maxAgeHour} jam`);
   console.log("–––––––––––––––––––––––––––––––––––––––––––");
   console.log("🚀 Memulai Auto Volume Mode (Multi-Wallet)...\n");
@@ -330,13 +372,27 @@ for (const w of walletQueue) {
   while (true) {
     try {
       const cooldownMap = loadCooldownMap();
-      const tokens = await getTopTokens("5m");
+      await getTopTokens("5m");
+      const tokens = globalThis.topTokens || [];
 
       for (const token of tokens) {
-        const baseMint = token.baseAsset.id;
-        const symbol = token.baseAsset.symbol;
+        let baseMint, symbol;
+      
+        if (globalThis.MODE_TYPE === "mode1") {
+          baseMint = token.baseAsset.id;
+          symbol = token.baseAsset.symbol;
+        } else {
+          baseMint = token.mintX;
+          symbol = token.symbol;
+        }
 
-        const poolAddress = await getMatchingPool(baseMint);
+        let poolAddress;
+
+        if (globalThis.MODE_TYPE === "mode2") {
+          poolAddress = token.address; // langsung pakai dari hasil meteorScore
+        } else {
+          poolAddress = await getMatchingPool(token.baseMint); // cari kalau mode1
+        }
         if (!poolAddress || monitoredPools.has(poolAddress)) continue;
 
         let walletSlot;
