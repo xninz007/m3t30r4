@@ -83,7 +83,17 @@ export async function monitorPnL(poolAddressStr, user) {
   const currentBinId = activeBin?.binId;
 
   const currentPosKeys = [];
-
+  let forceRemoveList = {};
+  const forceRemovePath = "./forceRemove.json";
+  
+  if (fs.existsSync(forceRemovePath)) {
+    try {
+      forceRemoveList = JSON.parse(fs.readFileSync(forceRemovePath, "utf8"));
+    } catch (e) {
+      console.warn("⚠️ forceRemove.json rusak:", e.message);
+    }
+  }
+  
   for (const pos of userPositions) {
     const posKey = pos.publicKey.toBase58();
     const data = pos.positionData;
@@ -169,16 +179,18 @@ export async function monitorPnL(poolAddressStr, user) {
       }
       
       // ✅ Tambahkan support force remove dari Telegram
-      if (pnlStore[posKey]?.manualTriggered && pnlStore[posKey]?.forceRemove) {
-        console.log(`${getTimestamp()} 🧨 Force remove by Telegram: ${posKey.slice(0, 6)}`);
-        forceRemove = true; // langsung trigger tanpa ubah percent
-        delete pnlStore[posKey].forceRemove;
+      if (forceRemoveList[posKey]) {
+        console.log(`${getTimestamp()} 🧨 Semua Posisi Aktif ditutup paksa!`);
+        forceRemove = true;
+        delete forceRemoveList[posKey];
+        fs.writeFileSync(forceRemovePath, JSON.stringify(forceRemoveList, null, 2));
       }
+      
       
       
       if (percent >= TP || percent <= SL || forceRemove) {
         pendingRemove.add(posKey);
-        let reason = percent >= TP ? 'TP' : percent <= SL ? 'SL' : 'OUT-OF-RANGE';
+        let reason = forceRemove ? 'FORCE' : percent >= TP ? 'TP' : percent <= SL ? 'SL' : 'OUT-OF-RANGE';
         console.log(`${getTimestamp()} 🎯 Posisi ${posKey.slice(0, 6)} hit ${reason} (${percent.toFixed(2)}%)`);
 
       
