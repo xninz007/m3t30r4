@@ -112,6 +112,7 @@ export async function calculateMeteorScore() {
 
   combined.sort((a, b) => b.meteorScore - a.meteorScore);
 
+  const MIN_SCORE = 30;
   const uniqueByMintX = new Map();
   for (const pool of combined) {
     const existing = uniqueByMintX.get(pool.mintX);
@@ -120,7 +121,9 @@ export async function calculateMeteorScore() {
     }
   }
 
-  const finalPools = Array.from(uniqueByMintX.values());
+  const finalPools = Array.from(uniqueByMintX.values())
+    .filter(p => p.meteorScore >= MIN_SCORE);
+
 
   fs.writeFileSync("meteor_score_v2.json", JSON.stringify(finalPools, null, 2));
 }
