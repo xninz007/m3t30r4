@@ -162,6 +162,33 @@ export async function monitorPnL(poolAddressStr, user) {
 
       const TP = globalThis.RUNTIME_CONFIG?.TAKE_PROFIT ?? 10;
       const SL = globalThis.RUNTIME_CONFIG?.STOP_LOSS ?? -5;
+      const TRAIL = globalThis.RUNTIME_CONFIG?.TRAILING_OFFSET ?? 2;
+      const useTrailing = globalThis.RUNTIME_CONFIG?.TRAILING_MODE ?? false;
+      let triggerTP = false;
+      let triggerSL = false;
+      
+      if (useTrailing) {
+        if (percent >= TP || pnlStore[posKey]?.peakPercent !== undefined) {
+          const oldPeak = pnlStore[posKey].peakPercent || percent;
+          pnlStore[posKey].peakPercent = Math.max(oldPeak, percent);
+      
+          // 🟢 Tambahkan log saat peak naik
+          if (pnlStore[posKey].peakPercent !== oldPeak) {
+            console.log(`${getTimestamp()} 📈 Peak profit diperbarui: ${oldPeak.toFixed(2)}% → ${pnlStore[posKey].peakPercent.toFixed(2)}%`);
+          }
+      
+          const trailingStop = pnlStore[posKey].peakPercent - TRAIL;
+          if (percent <= trailingStop) {
+            console.log(`${getTimestamp()} 🪂 Trigger TP (Trailing): turun dari peak ${pnlStore[posKey].peakPercent.toFixed(2)}% → ${percent.toFixed(2)}%`);
+            triggerTP = true;
+          }
+        }
+        if (percent <= SL) triggerSL = true;
+      } else {
+        triggerTP = percent >= TP;
+        triggerSL = percent <= SL;
+      }
+                  
       let forceRemove = false;
       
       if (!inRange) {
@@ -188,9 +215,9 @@ export async function monitorPnL(poolAddressStr, user) {
       
       
       
-      if (percent >= TP || percent <= SL || forceRemove) {
+      if (triggerTP || triggerSL || forceRemove) {
         pendingRemove.add(posKey);
-        let reason = forceRemove ? 'FORCE' : percent >= TP ? 'TP' : percent <= SL ? 'SL' : 'OUT-OF-RANGE';
+        let reason = forceRemove ? 'FORCE' : triggerTP ? 'TP' : triggerSL  ? 'SL' : 'OUT-OF-RANGE';
         console.log(`${getTimestamp()} 🎯 Posisi ${posKey.slice(0, 6)} hit ${reason} (${percent.toFixed(2)}%)`);
 
       
@@ -199,7 +226,7 @@ export async function monitorPnL(poolAddressStr, user) {
           pnlStore[posKey].lossCount = (pnlStore[posKey].lossCount || 0) + 1;
           console.log(`${getTimestamp()} 📉 Posisi ${posKey.slice(0, 6)} mengalami kerugian ke-${pnlStore[posKey].lossCount}`);
       
-          if (pnlStore[posKey].lossCount >= 2) {
+          if (pnlStore[posKey].lossCount >= 1) {
             const skipUntil = Date.now() + 24 * 60 * 60 * 1000; // 1 hari
             const cooldownGlobalPath = "./cooldown.json";
             const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
@@ -232,7 +259,7 @@ export async function monitorPnL(poolAddressStr, user) {
       
         let success = false;
       
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 5; attempt++) {
           try {
             const tx = await dlmmPool.removeLiquidity({
               position: pos.publicKey,
@@ -288,7 +315,7 @@ export async function monitorPnL(poolAddressStr, user) {
           pendingSwap.add(posKey);
         
           let success = false;
-          for (let attempt = 1; attempt <= 3; attempt++) {
+          for (let attempt = 1; attempt <= 5; attempt++) {
             try {
               const sig = await autoSwap({
                 inputMint: mintXStr,
