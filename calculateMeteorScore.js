@@ -92,6 +92,7 @@ export async function calculateMeteorScore() {
 
   if (combined.length === 0) {
     console.error("❌ Tidak ada pool SOL yang lolos filter!");
+    fs.writeFileSync("meteor_score_v2.json", JSON.stringify([], null, 2)); // Kosongkan file
     return;
   }
 
@@ -111,7 +112,6 @@ export async function calculateMeteorScore() {
   }
 
   combined.sort((a, b) => b.meteorScore - a.meteorScore);
-
   const MIN_SCORE = 30;
   const uniqueByMintX = new Map();
   for (const pool of combined) {
@@ -123,7 +123,6 @@ export async function calculateMeteorScore() {
 
   const finalPools = Array.from(uniqueByMintX.values())
     .filter(p => p.meteorScore >= MIN_SCORE);
-
 
   fs.writeFileSync("meteor_score_v2.json", JSON.stringify(finalPools, null, 2));
 }
