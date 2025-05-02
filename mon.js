@@ -85,7 +85,7 @@ export async function monitorPnL(poolAddressStr, user) {
   const currentPosKeys = [];
   let forceRemoveList = {};
   const forceRemovePath = "./forceRemove.json";
-  
+
   if (fs.existsSync(forceRemovePath)) {
     try {
       forceRemoveList = JSON.parse(fs.readFileSync(forceRemovePath, "utf8"));
@@ -93,7 +93,7 @@ export async function monitorPnL(poolAddressStr, user) {
       console.warn("⚠️ forceRemove.json rusak:", e.message);
     }
   }
-  
+
   for (const pos of userPositions) {
     const posKey = pos.publicKey.toBase58();
     const data = pos.positionData;
@@ -147,9 +147,9 @@ export async function monitorPnL(poolAddressStr, user) {
     const feeUsd = feeX * priceX + feeY * priceY;
     const lpValue = amountX * priceX + amountY * priceY;
     const hodlValue = (amountX + feeX) * priceX + (amountY + feeY) * priceY;
-    
+
     const IL = ((hodlValue - lpValue) / hodlValue) * 100;
-    const IL_USD = hodlValue - lpValue;    
+    const IL_USD = hodlValue - lpValue;
 
       console.log(
         `${getTimestamp()} [${publicKey.toBase58().slice(0, 6)}] [${poolAddressStr.slice(0, 6)}] [${posKey.slice(0, 6)}] (${pairName})` +
@@ -158,7 +158,7 @@ export async function monitorPnL(poolAddressStr, user) {
         `${profit >= 0 ? "🟢" : "🔴"} ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)} (${percent.toFixed(2)}%) | ` +
         `💸 Fee: $${feeUsd.toFixed(2)} | 📉 IL: $${IL_USD.toFixed(2)} (${IL.toFixed(2)}%)`
       );
-      
+
 
       const TP = globalThis.RUNTIME_CONFIG?.TAKE_PROFIT ?? 10;
       const SL = globalThis.RUNTIME_CONFIG?.STOP_LOSS ?? -5;
@@ -166,17 +166,17 @@ export async function monitorPnL(poolAddressStr, user) {
       const useTrailing = globalThis.RUNTIME_CONFIG?.TRAILING_MODE ?? false;
       let triggerTP = false;
       let triggerSL = false;
-      
+
       if (useTrailing) {
         if (percent >= TP || pnlStore[posKey]?.peakPercent !== undefined) {
           const oldPeak = pnlStore[posKey].peakPercent || percent;
           pnlStore[posKey].peakPercent = Math.max(oldPeak, percent);
-      
+
           // 🟢 Tambahkan log saat peak naik
           if (pnlStore[posKey].peakPercent !== oldPeak) {
             console.log(`${getTimestamp()} 📈 Peak profit diperbarui: ${oldPeak.toFixed(2)}% → ${pnlStore[posKey].peakPercent.toFixed(2)}%`);
           }
-      
+
           const trailingStop = pnlStore[posKey].peakPercent - TRAIL;
           if (percent <= trailingStop) {
             console.log(`${getTimestamp()} 🪂 Trigger TP (Trailing): turun dari peak ${pnlStore[posKey].peakPercent.toFixed(2)}% → ${percent.toFixed(2)}%`);
@@ -188,9 +188,9 @@ export async function monitorPnL(poolAddressStr, user) {
         triggerTP = percent >= TP;
         triggerSL = percent <= SL;
       }
-                  
+
       let forceRemove = false;
-      
+
       if (!inRange) {
         if (!pnlStore[posKey].outSince) {
           pnlStore[posKey].outSince = now;
@@ -204,7 +204,7 @@ export async function monitorPnL(poolAddressStr, user) {
         delete pnlStore[posKey].manualRemoveOutOfRange;
         delete pnlStore[posKey].alreadyTriggered;
       }
-      
+
       // ✅ Tambahkan support force remove dari Telegram
       if (forceRemoveList[posKey]) {
         console.log(`${getTimestamp()} 🧨 Semua Posisi Aktif ditutup paksa!`);
@@ -212,53 +212,53 @@ export async function monitorPnL(poolAddressStr, user) {
         delete forceRemoveList[posKey];
         fs.writeFileSync(forceRemovePath, JSON.stringify(forceRemoveList, null, 2));
       }
-      
-      
-      
+
+
+
       if (triggerTP || triggerSL || forceRemove) {
         pendingRemove.add(posKey);
         let reason = forceRemove ? 'FORCE' : triggerTP ? 'TP' : triggerSL  ? 'SL' : 'OUT-OF-RANGE';
         console.log(`${getTimestamp()} 🎯 Posisi ${posKey.slice(0, 6)} hit ${reason} (${percent.toFixed(2)}%)`);
 
-      
+
         // 💥 Jika SL, tambahkan lossCount
-        if (percent <= SL) {
+        if (triggerSL) {
           pnlStore[posKey].lossCount = (pnlStore[posKey].lossCount || 0) + 1;
           console.log(`${getTimestamp()} 📉 Posisi ${posKey.slice(0, 6)} mengalami kerugian ke-${pnlStore[posKey].lossCount}`);
-      
+
           if (pnlStore[posKey].lossCount >= 1) {
             const skipUntil = Date.now() + 24 * 60 * 60 * 1000; // 1 hari
             const cooldownGlobalPath = "./cooldown.json";
             const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
               ? JSON.parse(fs.readFileSync(cooldownGlobalPath, "utf8"))
               : {};
-      
+
             cooldownGlobal[mintXStr] = skipUntil;
             fs.writeFileSync(cooldownGlobalPath, JSON.stringify(cooldownGlobal, null, 2));
-      
+
             console.log(`${getTimestamp()} 🚫 Token ${mintXStr.slice(0, 6)} rugi 2x, skip selama 1 hari sampai ${new Date(skipUntil).toLocaleTimeString()}`);
           }
         }
-      
+
         // 🟢 Reset lossCount & set cooldown jika TP
-        if (percent >= TP) {
+        if (triggerTP) {
           pnlStore[posKey].lossCount = 0;
           pnlStore[posKey].cooldownUntil = Date.now() + 6 * 60 * 60 * 1000;
           console.log(`${getTimestamp()} ⏸️ Token cooldown hingga ${new Date(pnlStore[posKey].cooldownUntil).toLocaleTimeString()}`);
-      
+
           const cooldownGlobalPath = "./cooldown.json";
           const cooldownGlobal = fs.existsSync(cooldownGlobalPath)
             ? JSON.parse(fs.readFileSync(cooldownGlobalPath, "utf8"))
             : {};
-      
+
           cooldownGlobal[mintXStr] = pnlStore[posKey].cooldownUntil;
           fs.writeFileSync(cooldownGlobalPath, JSON.stringify(cooldownGlobal, null, 2));
         }
-      
+
         pendingRemove.add(posKey);
-      
+
         let success = false;
-      
+
         for (let attempt = 1; attempt <= 5; attempt++) {
           try {
             const tx = await dlmmPool.removeLiquidity({
@@ -270,19 +270,19 @@ export async function monitorPnL(poolAddressStr, user) {
               shouldClaimAndClose: true,
               extraComputeUnits: getPriorityInstructions("ultra"),
             });
-      
+
             const sig = await sendAndConfirmTransaction(connection, tx, [user], {
               commitment: "confirmed",
             });
-      
+
             console.log(`${getTimestamp()} ✅ TX Remove (attempt ${attempt}):`, sig);
             await delay(1000);
-      
+
             pnlStore[posKey].isClosed = true;
             delete pnlStore[posKey].alreadyTriggered;
             delete pnlStore[posKey].manualTriggered; // ✅ hapus manual flag
             pnlStore[posKey].removedAt = Date.now();
-      
+
             success = true;
             break;
           } catch (e) {
@@ -290,19 +290,19 @@ export async function monitorPnL(poolAddressStr, user) {
             await delay(2000);
           }
         }
-      
+
         if (!success) {
           console.warn(`${getTimestamp()} ❌ Gagal remove posisi ${posKey.slice(0, 6)} setelah 3 percobaan`);
           pnlStore[posKey].removeFailed = true;
           pendingRemove.delete(posKey);
           return;
         }
-      
+
         // ⏳ Tunggu token masuk
         let balX = 0;
         const MIN_SWAP = 1_000;
         const MAX_TRY = 10;
-      
+
         console.log(`${getTimestamp()} 🔍 Menunggu token ${mintXStr.slice(0, 6)} masuk ke wallet...`);
         for (let i = 0; i < MAX_TRY; i++) {
           await delay(2000);
@@ -310,10 +310,10 @@ export async function monitorPnL(poolAddressStr, user) {
           console.log(`${getTimestamp()} 🔁 Cek saldo token X [${i + 1}/${MAX_TRY}]: ${balX}`);
           if (balX > MIN_SWAP) break;
         }
-      
+
         if (balX > MIN_SWAP && !pendingSwap.has(posKey)) {
           pendingSwap.add(posKey);
-        
+
           let success = false;
           for (let attempt = 1; attempt <= 5; attempt++) {
             try {
@@ -323,7 +323,7 @@ export async function monitorPnL(poolAddressStr, user) {
                 amountInLamports: balX,
                 signer: user,
               });
-        
+
               if (!sig || typeof sig !== "string" || !sig.match(/^.{10,}$/)) {
                 throw new Error("Swap gagal: signature tidak valid.");
               }
@@ -336,7 +336,7 @@ export async function monitorPnL(poolAddressStr, user) {
                 console.warn(`${getTimestamp()} ❌ TX Swap gagal secara on-chain (custom error):`, txInfo.meta.err);
                 throw new Error("TX failed on-chain");
               }
-        
+
               console.log(`${getTimestamp()} 🔁 Swapped to WSOL (attempt ${attempt}):`, sig);
               success = true;
               break;
@@ -345,7 +345,7 @@ export async function monitorPnL(poolAddressStr, user) {
               await delay(2000);
             }
           }
-        
+
           if (!success) {
             console.warn(`${getTimestamp()} ❌ Swap gagal total setelah 3 percobaan untuk ${mintXStr.slice(0, 6)}`);
             saveTrackedSwap(mintXStr, user.publicKey.toBase58());
@@ -354,7 +354,7 @@ export async function monitorPnL(poolAddressStr, user) {
             const WSOL_MINT = "So11111111111111111111111111111111111111112";
             const MAX_RETRY = 10;
             let wsolBal = 0;
-          
+
             console.log(`${getTimestamp()} 🔍 Cek saldo WSOL sebelum unwrap...`);
             for (let i = 0; i < MAX_RETRY; i++) {
               await delay(1500);
@@ -362,11 +362,11 @@ export async function monitorPnL(poolAddressStr, user) {
               console.log(`${getTimestamp()} 🔁 Cek saldo WSOL #${i + 1}: ${wsolBal}`);
               if (wsolBal > 0) break;
             }
-          
+
             if (wsolBal > 0) {
               console.log(`${getTimestamp()} ⏳ Delay 5 detik sebelum mencoba unwrap WSOL...`);
               await delay(5000);
-          
+
               let unwrapped = false;
               for (let retry = 1; retry <= 3; retry++) {
                 unwrapped = await autoUnwrapWsol(user);
@@ -382,22 +382,22 @@ export async function monitorPnL(poolAddressStr, user) {
                   }
                 }
               }
-          
+
               if (!unwrapped) {
                 console.warn(`${getTimestamp()} ⚠️ Gagal unwrap WSOL ke SOL setelah 3 percobaan`);
               }
-          
+
             } else {
               console.warn(`${getTimestamp()} ⚠️ Tidak ada WSOL untuk di-unwrapped setelah ${MAX_RETRY}x cek`);
             }
           }
-          
-        
+
+
           pendingSwap.delete(posKey);
         } else {
           console.warn(`${getTimestamp()} ❌ Gagal swap: saldo token X (${mintXStr.slice(0, 6)}) belum masuk setelah remove.`);
         }
-                  
+
         // Cleanup & return
         pendingRemove.delete(posKey);
         console.log(`${getTimestamp()} ✅ Posisi ${posKey.slice(0, 6)} ditutup & token diswap ke SOL`);
@@ -406,8 +406,8 @@ export async function monitorPnL(poolAddressStr, user) {
           baseMint: mintXStr,
           pool: poolAddressStr,
         };
-      }        
-    
+      }
+
   }
 
   const now = Date.now();
