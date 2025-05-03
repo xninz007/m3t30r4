@@ -45,6 +45,12 @@ export async function calculateMeteorScore() {
 
     const jupiterData = jupiterMap.get(pool.mint_x);
     if (!jupiterData) continue;
+    const stats1h = jupiterData.baseAsset.stats1h || {};
+    const numBuys = stats1h.numBuys || 1;
+    const numOrganicBuyers = stats1h.numOrganicBuyers || 0;
+    const organicRatio = numOrganicBuyers / numBuys;
+    
+    if (organicRatio < 0.01) continue;
 
     const createdAtStr = jupiterData.createdAt;
     if (!createdAtStr) continue;
@@ -61,7 +67,6 @@ export async function calculateMeteorScore() {
     const symbol = jupiterData.baseAsset.symbol;
     const baseMint = jupiterData.baseAsset.id;
     const stats5m = jupiterData.baseAsset.stats5m || {};
-    const stats1h = jupiterData.baseAsset.stats1h || {};
     const stats6h = jupiterData.baseAsset.stats6h || {};
     const stats24h = jupiterData.baseAsset.stats24h || {};
 
