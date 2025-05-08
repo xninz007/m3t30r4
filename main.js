@@ -391,7 +391,7 @@ for (const w of walletQueue) {
         if (globalThis.MODE_TYPE === "mode2") {
           poolAddress = token.address; // langsung pakai dari hasil meteorScore
         } else {
-          poolAddress = await getMatchingPool(token.baseMint); // cari kalau mode1
+          poolAddress = await getMatchingPool(baseMint); // cari kalau mode1
         }
         if (!poolAddress || monitoredPools.has(poolAddress)) continue;
 
