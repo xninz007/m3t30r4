@@ -1,4 +1,3 @@
-// update jam 12.56 29 April 2025
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { RPC } from "./config.js";
 import { autoSwap } from "./autoswap.js";
@@ -87,13 +86,18 @@ async function getTopTokens(timeframe = "5m") {
         const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
         const isScoreOk = (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
 
+        const numBuys = p.baseAsset.stats1h?.numBuys || 0;
+        const numOrganicBuyers = p.baseAsset.stats1h?.numOrganicBuyers || 0;
+        const organicRatio = numBuys > 0 ? numOrganicBuyers / numBuys : 0;
+        
         return (
           p.volume24h >= MIN_VOLUME &&
           isSOL &&
           isAgeOk &&
           mcap >= MIN_MCAP &&
           mcap <= MAX_MCAP &&
-          isScoreOk
+          isScoreOk &&
+          organicRatio >= 0.03          
         );
       })
       .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
