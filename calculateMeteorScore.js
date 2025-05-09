@@ -50,7 +50,7 @@ export async function calculateMeteorScore() {
     const numOrganicBuyers = stats1h.numOrganicBuyers || 0;
     const organicRatio = numOrganicBuyers / numBuys;
     
-    if (organicRatio < 0.01) continue;
+    if (organicRatio < 0.03) continue;
 
     const createdAtStr = jupiterData.createdAt;
     if (!createdAtStr) continue;
