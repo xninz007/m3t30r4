@@ -222,7 +222,7 @@ export async function monitorPnL(poolAddressStr, user) {
 
       
         // 💥 Jika SL, tambahkan lossCount
-        if (percent <= SL) {
+        if (triggerSL) {
           pnlStore[posKey].lossCount = (pnlStore[posKey].lossCount || 0) + 1;
           console.log(`${getTimestamp()} 📉 Posisi ${posKey.slice(0, 6)} mengalami kerugian ke-${pnlStore[posKey].lossCount}`);
       
@@ -241,7 +241,7 @@ export async function monitorPnL(poolAddressStr, user) {
         }
       
         // 🟢 Reset lossCount & set cooldown jika TP
-        if (percent >= TP) {
+        if (triggerTP) {
           pnlStore[posKey].lossCount = 0;
           pnlStore[posKey].cooldownUntil = Date.now() + 6 * 60 * 60 * 1000;
           console.log(`${getTimestamp()} ⏸️ Token cooldown hingga ${new Date(pnlStore[posKey].cooldownUntil).toLocaleTimeString()}`);
