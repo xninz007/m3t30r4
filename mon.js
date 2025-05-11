@@ -194,12 +194,26 @@ export async function monitorPnL(poolAddressStr, user) {
       if (!inRange) {
         if (!pnlStore[posKey].outSince) {
           pnlStore[posKey].outSince = now;
-        } else if (now - pnlStore[posKey].outSince > 5 * 60 * 1000 && !pnlStore[posKey].manualRemoveOutOfRange) {
-          console.log(`${getTimestamp()} ⏱️ ${posKey.slice(0, 6)} out-of-range >5 menit, langsung trigger auto-remove`);
-          pnlStore[posKey].manualRemoveOutOfRange = true;
-          forceRemove = true;
+        } else {
+          const outDuration = now - pnlStore[posKey].outSince;
+
+          if (outDuration > 5 * 60 * 1000 && !pnlStore[posKey].manualRemoveOutOfRange) {
+            // ✅ Out-of-range lebih dari 5 menit
+            if (percent >= TP) {
+              console.log(`${getTimestamp()} ⏱️ Out-of-range + profit ≥ TP → treat as TP`);
+              triggerTP = true;
+            } else if (percent <= SL) {
+              console.log(`${getTimestamp()} ⏱️ Out-of-range + loss ≤ SL → treat as SL`);
+              triggerSL = true;
+            } else {
+              console.log(`${getTimestamp()} ⏱️ ${posKey.slice(0, 6)} out-of-range >5 menit, langsung trigger auto-remove`);
+              pnlStore[posKey].manualRemoveOutOfRange = true;
+              forceRemove = true;
+            }
+          }
         }
       } else {
+        // ✅ Reset flag jika balik in-range
         delete pnlStore[posKey].outSince;
         delete pnlStore[posKey].manualRemoveOutOfRange;
         delete pnlStore[posKey].alreadyTriggered;
