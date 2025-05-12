@@ -10,12 +10,14 @@ import BN from "bn.js";
 import fs from "fs";
 import inquirer from "inquirer";
 import { monitorPnL } from "./mon.js";
-import { getTokenScore } from "./scorer.js";
 import bs58 from "bs58";
 import * as util from 'util';
 import { saveTrackedSwap, runSwapTracker } from "./swaptracker.js";
 import { runHourlyCheck } from "./hourly.js";
 import { calculateMeteorScore } from "./calculateMeteorScore.js";
+
+globalThis.TELEGRAM_BOT_INSTANCE = bot;
+globalThis.TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID;
 
 const logFile = fs.createWriteStream('bot.log', { flags: 'a' });
 const logStdout = process.stdout;
@@ -28,7 +30,7 @@ console.warn = console.error = console.log;
 
 
 const connection = new Connection(RPC, "confirmed");
-const BIN_STEPS = [80, 100, 125, 250];
+const BIN_STEPS = null;
 const pnlStorePath = "./pnl.json";
 const CONFIG_CACHE_PATH = "./config_cache.json";
 
@@ -65,7 +67,7 @@ function loadCooldownMap() {
 async function getTopTokens(timeframe = "5m") {
   if (globalThis.MODE_TYPE === "mode1") {
     // Mode 1 - pakai data dari Jupiter
-    const url = `https://datapi.jup.ag/v1/pools/toporganicscore/${timeframe}`;
+    const url = `https://datapi.jup.ag/v1/pools/toptraded/${timeframe}`;
     await delay(1000);
     const res = await fetch(url);
     const json = await res.json();
@@ -77,31 +79,31 @@ async function getTopTokens(timeframe = "5m") {
     const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
 
     const filtered = json.pools
-      .filter(p => {
-        const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
-        const age = Date.now() - new Date(p.createdAt || 0).getTime();
-        const isAgeOk = age >= MIN_AGE_MS && age <= MAX_AGE_MS;
-        const mcap = p.baseAsset.mcap || 0;
-        const score = p.baseAsset.organicScore ?? 0;
-        const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
-        const isScoreOk = (scoreLabel === "medium" || scoreLabel === "high") && score >= 75;
-
-        const numBuys = p.baseAsset.stats1h?.numBuys || 0;
-        const numOrganicBuyers = p.baseAsset.stats1h?.numOrganicBuyers || 0;
-        const organicRatio = numBuys > 0 ? numOrganicBuyers / numBuys : 0;
-        
-        return (
-          p.volume24h >= MIN_VOLUME &&
-          isSOL &&
-          isAgeOk &&
-          mcap >= MIN_MCAP &&
-          mcap <= MAX_MCAP &&
-          isScoreOk &&
-          organicRatio >= 0.03          
-        );
-      })
-      .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
-      .sort((a, b) => b.score - a.score);
+    .filter(p => {
+      const isSOL = p.quoteAsset === "So11111111111111111111111111111111111111112";
+      const age = Date.now() - new Date(p.createdAt || 0).getTime();
+      const isAgeOk = age >= MIN_AGE_MS && age <= MAX_AGE_MS;
+      const mcap = p.baseAsset.mcap || 0;
+      const score = p.baseAsset.organicScore ?? 0;
+      const scoreLabel = (p.baseAsset.organicScoreLabel || "").toLowerCase();
+      const isScoreOk = score >= 60;
+  
+      const numBuys = p.baseAsset.stats1h?.numBuys || 0;
+      const numOrganicBuyers = p.baseAsset.stats1h?.numOrganicBuyers || 0;
+      const organicRatio = numBuys > 0 ? numOrganicBuyers / numBuys : 0;
+  
+      return (
+        p.volume24h >= MIN_VOLUME &&
+        isSOL &&
+        isAgeOk &&
+        mcap >= MIN_MCAP &&
+        mcap <= MAX_MCAP &&
+        isScoreOk &&
+        organicRatio >= 0.03
+      );
+    })
+    .map(p => ({ ...p, score: p.baseAsset.organicScore ?? 0 }))
+    .sort((a, b) => b.score - a.score);
 
     globalThis.topTokens = filtered;
     console.log(`✅ [Top Organic] ${globalThis.topTokens.length} tokens di-load`);
@@ -117,7 +119,102 @@ async function getTopTokens(timeframe = "5m") {
       score: d.meteorScore,
     }));
     console.log(`✅ [MeteoraScore] ${globalThis.topTokens.length} tokens di-load`);
+
+} else if (globalThis.MODE_TYPE === "mode3") {
+  const meteoraUrl = `https://dlmm-api.meteora.ag/pair/all_by_groups?page=0&limit=100&unknown=true&sort_key=volume1h&order_by=desc`;
+  await delay(1000);
+  const res = await fetch(meteoraUrl);
+  const meteoraData = await res.json();
+  const allPools = meteoraData.groups.flatMap(g => g.pairs || []);
+
+  const MIN_VOLUME_DLMM = globalThis.RUNTIME_CONFIG?.MIN_VOLUME_DLMM || 1000;
+  const MIN_VOLUME = globalThis.RUNTIME_CONFIG?.MIN_VOLUME || 1_000_000;
+  const MIN_MCAP = globalThis.RUNTIME_CONFIG?.MIN_MCAP || 100_000;
+  const MAX_MCAP = globalThis.RUNTIME_CONFIG?.MAX_MCAP || Infinity;
+  const MIN_AGE_MS = (globalThis.RUNTIME_CONFIG?.MIN_AGE_HOUR || 0.5) * 60 * 60 * 1000;
+  const MAX_AGE_MS = (globalThis.RUNTIME_CONFIG?.MAX_AGE_HOUR || 12) * 60 * 60 * 1000;
+
+  const mintList = [...new Set(allPools.map(p => p.mint_x))];
+  const jupRes = await fetch(`https://datapi.jup.ag/v1/pools?assetIds=${mintList.join(",")}`);
+  const jupJson = await jupRes.json();
+
+  // ✅ Flexible parsing for both array or grouped object
+  const jupEntries = Array.isArray(jupJson)
+    ? jupJson
+    : Array.isArray(jupJson.pools)
+    ? jupJson.pools
+    : Object.values(jupJson).flat();
+
+  const jupGrouped = new Map();
+  for (const pool of jupEntries) {
+    const mint = pool.baseAsset?.id;
+    if (!mint) continue;
+    if (!jupGrouped.has(mint)) jupGrouped.set(mint, []);
+    jupGrouped.get(mint).push(pool);
   }
+
+  const filtered = [];
+  for (const p of allPools) {
+    const isSOL = p.mint_y === "So11111111111111111111111111111111111111112";
+    if (!isSOL) {
+      continue;
+    }
+
+    const vol1h = Number(p.volume?.hour_1) || 0;
+    if (vol1h < MIN_VOLUME_DLMM) {
+      continue;
+    }
+
+    let jupList = jupGrouped.get(p.mint_x);
+    if (!jupList || jupList.length === 0) {
+      try {
+        const fallbackRes = await fetch(`https://datapi.jup.ag/v1/pools?assetIds=${p.mint_x}`);
+        const fallbackJson = await fallbackRes.json();
+        const fallbackPools = fallbackJson?.pools || [];
+        if (fallbackPools.length > 0) {
+          jupList = fallbackPools;
+        } else {
+          continue;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    const jup = jupList.sort((a, b) => (b.liquidity || 0) - (a.liquidity || 0))[0];
+    const age = Date.now() - new Date(jup.createdAt).getTime();
+    const buyVol = jup.baseAsset?.stats1h?.buyVolume || 0;
+    const sellVol = jup.baseAsset?.stats1h?.sellVolume || 0;
+    const volume1h = buyVol + sellVol;
+    const mcap = jup.baseAsset?.mcap || 0;
+    const volumeJup = jup.volume24h || 0;
+    const numBuys = jup.baseAsset?.stats1h?.numBuys || 0;
+    const numOrganicBuyers = jup.baseAsset?.stats1h?.numOrganicBuyers || 0;
+    const organicRatio = numBuys > 0 ? numOrganicBuyers / numBuys : 0;
+
+    if (volume1h < MIN_VOLUME) {
+      continue;
+    }
+    if (age < MIN_AGE_MS || age > MAX_AGE_MS) {
+      continue;
+    }
+    if (mcap < MIN_MCAP || mcap > MAX_MCAP) {
+      continue;
+    }
+
+    console.log(`✅ ${p.name} LOLOS (Mcap: ${mcap} | Vol 1h: ${volume1h} | DLMM Vol 1h: ${vol1h}`);
+    filtered.push({
+      mintX: p.mint_x,
+      address: p.address,
+      symbol: jup.baseAsset?.symbol || "???",
+      score: p.volume?.hour_1 || 0,
+    });
+  }
+
+  globalThis.topTokens = filtered.sort((a, b) => b.score - a.score);
+  console.log(`✅ [Mode3 DLMM] ${globalThis.topTokens.length} tokens di-load`);
+}
+
 }
 
 
@@ -132,7 +229,7 @@ async function getMatchingPool(baseMint) {
 
   for (const group of json.groups) {
     for (const pair of group.pairs) {
-      const isValidBin = BIN_STEPS.includes(pair.bin_step);
+      const isValidBin = pair.bin_step !== 20;
       const isSOL = pair.mint_y === "So11111111111111111111111111111111111111112";
       const volume = pair.trade_volume_24h || 0;
 
@@ -154,6 +251,7 @@ const { mode } = await inquirer.prompt([
     choices: [
       { name: "Mode 1 - Top Organic Jupiter", value: "mode1" },
       { name: "Mode 2 - Meteora Score Filtering", value: "mode2" },
+      { name: "Mode 3 - DLMM Volume → Filter JUP", value: "mode3" },
     ],
   },
 ]);
@@ -172,17 +270,26 @@ async function loadOrPromptConfig() {
     console.log(`🔹 Modal       : ${cached.solAmount} SOL`);
     console.log(`🔹 Take Profit : ${cached.takeProfit}%`);
     console.log(`🔹 Stop Loss   : ${cached.stopLoss}%`);
+    if (cached.useTrailing) {
+      console.log(`🔹 Trailing TP : ON`);
+      console.log(`🔹 Offset      : ${cached.trailingOffset || 2}%`);
+      console.log(`🔹 TP aktif    : Setelah profit ≥ ${cached.takeProfit}%, lalu turun lebih dari ${cached.trailingOffset || 2}%`);
+    } else {
+      console.log(`🔹 Trailing TP : OFF`);
+    }
     console.log(`🔹 Mode        : ${cached.mode}`);
     if (cached.mode === "One Side Tokens") {
       console.log(`🔹 Anchor Token: ${cached.anchorToken}`);
     }
     console.log(`🔹 Strategi    : ${cached.strategyType}`);
     console.log(`🔹 Min Volume  : ${cached.minVolume}`);
+    console.log(`🔹 Min Volume DLMM  : ${cached.minVolumeDlmm}`);
     console.log(`🔹 Min Mcap    : ${cached.minMcap}`);
     console.log(`🔹 Max Mcap    : ${cached.maxMcap}`);
     console.log(`🔹 Min Age     : ${cached.minAgeHour} jam`);
     console.log(`🔹 Max Age     : ${cached.maxAgeHour} jam`);
     console.log("–––––––––––––––––––––––––––––––––––––––––––");
+  
 
     const { configAction } = await inquirer.prompt([
       {
@@ -206,6 +313,20 @@ async function loadOrPromptConfig() {
       message: "💰 Masukkan jumlah SOL untuk swap (misal: 0.01):",
       default: "0.01",
       validate: (val) => (!isNaN(val) && val > 0 ? true : "Harus angka positif"),
+    },
+    {
+      type: "confirm",
+      name: "useTrailing",
+      message: "📉 Gunakan mode Trailing TP/SL?",
+      default: false,
+    },
+    {
+      type: "input",
+      name: "trailingOffset",
+      message: "📏 Jarak trailing offset (%) dari peak profit:",
+      when: (answers) => answers.useTrailing,
+      default: "2",
+      validate: (val) => (!isNaN(val) && val >= 0.1 ? true : "Harus angka >= 0.1"),
     },
     {
       type: "input",
@@ -240,6 +361,13 @@ async function loadOrPromptConfig() {
       message: "🦙 Pilih token sebagai dasar input (X atau Y):",
       when: (answers) => answers.mode === "One Side Tokens",
       choices: ["X", "Y"],
+    },
+    {
+      type: "input",
+      name: "minVolumeDlmm",
+      message: "📊 Minimum Volume 1H di DLMM (misal: 100000):",
+      default: "100000",
+      validate: (val) => (!isNaN(val) && val > 0 ? true : "Harus angka positif"),
     },
     {
       type: "input",
@@ -303,6 +431,9 @@ export async function autoVolumeLoop() {
     minAgeHour,
     maxAgeHour,
     onlyOnePositionPerWallet,
+    useTrailing,
+    trailingOffset,
+    minVolumeDlmm,
   } = await loadOrPromptConfig();
 
   globalThis.RUNTIME_CONFIG = {
@@ -318,18 +449,29 @@ export async function autoVolumeLoop() {
     MAX_AGE_HOUR: parseFloat(maxAgeHour),
     MAX_MCAP: parseFloat(maxMcap),
     onlyOnePositionPerWallet,
+    TRAILING_MODE: useTrailing || false,
+    TRAILING_OFFSET: parseFloat(trailingOffset || 2),
+    MIN_VOLUME_DLMM: parseFloat(minVolumeDlmm),
   };
 
   console.log("\n⚙️ Konfigurasi:");
   console.log(`🔹 Modal       : ${solAmount} SOL`);
   console.log(`🔹 Take Profit : ${takeProfit}%`);
   console.log(`🔹 Stop Loss   : ${stopLoss}%`);
+  if (useTrailing) {
+    console.log(`🔹 Trailing TP : ON`);
+    console.log(`🔹 Offset      : ${trailingOffset}% dari peak`);
+    console.log(`🔹 TP aktif    : Setelah profit ≥ ${takeProfit}%, lalu turun lebih dari ${trailingOffset}%`);
+  } else {
+    console.log(`🔹 Trailing TP : OFF`);
+  }
   console.log(`🔹 Mode        : ${mode}`);
   if (mode === "One Side Tokens") {
     console.log(`🔹 Anchor Token: ${anchorToken}`);
   }
   console.log(`🔹 Strategi    : ${strategyType}`);
   console.log(`🔹 Min Volume  : ${minVolume}`);
+  console.log(`🔹 Min Volume DLMM  : ${minVolumeDlmm}`);
   console.log(`🔹 Min Mcap    : ${minMcap}`);
   console.log(`🔹 Max Mcap    : ${maxMcap}`);
   console.log(`🔹 Min Age     : ${minAgeHour} jam`);
@@ -392,8 +534,8 @@ for (const w of walletQueue) {
 
         let poolAddress;
 
-        if (globalThis.MODE_TYPE === "mode2") {
-          poolAddress = token.address; // langsung pakai dari hasil meteorScore
+        if (globalThis.MODE_TYPE === "mode2" || globalThis.MODE_TYPE === "mode3") {
+          poolAddress = token.address; // langsung pakai dari hasil meteoraScore atau DLMM volume
         } else {
           poolAddress = await getMatchingPool(baseMint); // cari kalau mode1
         }
@@ -751,7 +893,7 @@ setInterval(async () => {
 }, 60_000);
 
 runSwapTracker(connection, walletQueue);
-setInterval(() => runSwapTracker(connection, walletQueue), 5 * 60 * 1000);
+setInterval(() => runSwapTracker(connection, walletQueue), 1 * 60 * 1000);
 setInterval(() => runHourlyCheck(walletQueue), 60 * 60 * 1000);
 
 autoVolumeLoop();
